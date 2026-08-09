@@ -561,7 +561,7 @@ namespace trinity::game
     // Unique byte signature.
     inline constexpr const char* kSig_InvHolderInsert =
         "48 89 5C 24 ? 4C 89 44 24 ? 48 89 54 24 ? 48 89 4C 24 ? 55 56 57 41 54 "
-        "41 55 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC F0 02 00 00";
+        "41 55 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC 10 03 00 00";
 
     // Inventory transaction COMMIT (IDB sub_1CE1E70), called by the transaction
     // orchestrator sub_1CC15C0 as `commit(holder, &err, CONTAINER, ...)` - its
@@ -788,12 +788,17 @@ namespace trinity::game
     // signature below IS the 216-byte placement stride - a nice self-check.
     inline constexpr const char* kSig_InvFreePlacements =
         "48 89 5C 24 ? 57 48 83 EC 20 48 89 CB 48 8B 09 48 85 C9 74 ? 31 FF 39 7B "
-        "? 76 ? 0F 1F 40 ? 89 F8 48 69 C8 D8 00 00 00";
+        "? 76 ? 0F 1F 40 ? 89 F8 48 69 C8 E0 00 00 00";
+    // Byte offset of that `imul` immediate inside the match. We re-read it at
+    // load and refuse Add Item unless it agrees with kPlacement_Stride - the
+    // stride moving under us is precisely how a placement loop would start
+    // writing into the wrong slot.
+    inline constexpr uintptr_t kOff_FreePlacements_StrideImm = 37;
     // TrItemValue dtor (IDB sub_ED6DF40, via thunk sub_1F88270). Destroys the
     // sub-objects the ctor allocated; does NOT free the buffer itself.
     inline constexpr const char* kSig_TrItemValueDtor =
         "48 89 5C 24 ? 48 89 74 24 ? 48 89 4C 24 ? 57 48 83 EC 20 48 89 CB 48 8B "
-        "89 ? ? ? ? BF 03 02 00 00 31 F6";
+        "89 ? ? ? ? BF 4D 8D C8 48 2B 3D";
 
     inline constexpr uintptr_t kOff_InvHolder_Container = 0x08; // holder+8 -> container
     // ItemInfo._defaultPushInventoryInfo - which storage this item goes to by
@@ -826,8 +831,11 @@ namespace trinity::game
     inline constexpr uintptr_t kItemVal_Size        = 0xC0; // == kInvSlot_Stride
     inline constexpr uintptr_t kOff_ItemVal_InstanceId = 0x00; // i64 (-1 out of the ctor)
     inline constexpr uintptr_t kOff_ItemVal_Subtype    = 0x0A; // u16 (reconcile zeroes it)
-    inline constexpr uintptr_t kPlacement_Stride       = 216;
-    inline constexpr uintptr_t kOff_Placement_SlotIdx  = 208;  // u16
+    // 1.17.00 grew the placement record by 8 bytes (216 -> 224) and moved the
+    // trailing slot index with it (+208 -> +216). Both were read straight out
+    // of the game's own commit loop, not guessed.
+    inline constexpr uintptr_t kPlacement_Stride       = 224;
+    inline constexpr uintptr_t kOff_Placement_SlotIdx  = 216;  // u16
 
     // --- The client/server realm flag ----------------------------------------
     // The engine runs two realms in one process and selects between them with a

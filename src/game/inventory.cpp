@@ -1157,11 +1157,28 @@ namespace trinity::game
         // resolved by the hook above - same function.
         const uintptr_t ctorAddr   = mem::FindPattern(kSig_TrItemValueCtor);
         const uintptr_t commitAddr = mem::FindPattern(kSig_InvCommitPlacement);
-        const uintptr_t freeAddr   = mem::FindPattern(kSig_InvFreePlacements);
+        uintptr_t       freeAddr   = mem::FindPattern(kSig_InvFreePlacements);
         const uintptr_t dtorAddr   = mem::FindPattern(kSig_TrItemValueDtor);
         if (ctorAddr)   oItemValueCtor   = reinterpret_cast<ItemValueCtor_t>(ctorAddr);
         if (commitAddr) oCommitPlacement = reinterpret_cast<CommitPlacement_t>(commitAddr);
         if (freeAddr)   oFreePlacements  = reinterpret_cast<FreePlacements_t>(freeAddr);
+        // Self-check: freePlacements walks the vector with `imul rcx, rax, <stride>`,
+        // so the live stride is right there in the code. If it ever disagrees with
+        // what we plan against, the placement layout moved and every slot index we
+        // compute would be wrong - refuse rather than write.
+        if (freeAddr)
+        {
+            const uint32_t liveStride =
+                *reinterpret_cast<const uint32_t*>(freeAddr + kOff_FreePlacements_StrideImm);
+            if (liveStride != kPlacement_Stride)
+            {
+                LOG_ERR("inventory: placement stride is %u, expected %u - "
+                        "the record layout moved. Add Item disabled.",
+                        liveStride, static_cast<unsigned>(kPlacement_Stride));
+                oFreePlacements = nullptr;
+                freeAddr = 0;
+            }
+        }
         if (dtorAddr)   oItemValueDtor   = reinterpret_cast<ItemValueDtor_t>(dtorAddr);
         // The TEB lookup for the realm flag. Deliberately NtQueryInformationThread
         // rather than a hand-rolled `mov rax, gs:[30h]` stub: that was tried and
