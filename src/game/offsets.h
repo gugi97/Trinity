@@ -807,7 +807,22 @@ namespace trinity::game
     inline constexpr uintptr_t kOff_InvHolder_Container = 0x08; // holder+8 -> container
     // ItemInfo._defaultPushInventoryInfo - which storage this item goes to by
     // default. The commit re-reads it, but we need it to pick the bucket too.
-    inline constexpr uintptr_t kOff_ItemDef_BucketType  = 66;   // u16
+    // Read out of commit itself in 1.17.00 (it re-finds the bucket the same
+    // way we do), which resolves the def and then takes the storage type from
+    // +0x418 - not +66 as in the analysed build:
+    //     call  <iteminfo resolver>          ; rax = item def
+    //     movzx edx, word ptr [rax + 0x418]  ; default push inventory
+    //     mov   rax, qword ptr [rsi + 0x18]  ; holder bucket array
+    //     mov   ecx, dword ptr [rsi + 0x20]  ; bucket count
+    //     cmp   word ptr [rbx + 0x10], dx    ; bucket type  (unchanged)
+    // Reading +66 returned 0xFFFF, the sentinel, so no bucket ever matched and
+    // every add reported PARTIAL with nothing written.
+    //
+    // Note commit has a prior path we deliberately do not replicate: when
+    // def+0x270 is non-null it asks the holder for a preferred storage first
+    // and only falls back to +0x418 when that returns 0xFFFF. The fallback is
+    // the general case and is what the planner is happy with.
+    inline constexpr uintptr_t kOff_ItemDef_BucketType  = 0x418; // u16
     //
     // ★ The inventory CONTAINER *is* the player CHARACTER object - the very same
     // "owner" the player/god-mode code resolves. Live-confirmed 2026-07-15: the
