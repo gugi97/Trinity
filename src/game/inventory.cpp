@@ -263,8 +263,55 @@ namespace trinity::game
         // text is interned lazily, and a string that has not been interned yet
         // stores -1, which fails the check and makes us fall back rather than
         // read a wild pointer.
+        // --- One-shot layout diagnostic (read-only) --------------------------
+        // Dumps the bytes behind a localised-string field the first few times
+        // it is used, so a moved struct member can be read off real memory
+        // instead of guessed. Guarded reads throughout; writes nothing.
+        int g_locDumps = 0;
+
+        void DumpHex(const char* what, uintptr_t addr, size_t len)
+        {
+            char line[160];
+            for (size_t o = 0; o < len; o += 16)
+            {
+                int w = snprintf(line, sizeof(line), "    %s +%02zX:", what, o);
+                for (size_t i = 0; i < 16 && o + i < len; ++i)
+                {
+                    uint8_t b = 0;
+                    if (!Read8(addr + o + i, &b)) { w += snprintf(line + w, sizeof(line) - w, " ??"); continue; }
+                    w += snprintf(line + w, sizeof(line) - w, " %02X", b);
+                }
+                LOG("%s", line);
+            }
+        }
+
+        void DumpLocField(uintptr_t structAddr)
+        {
+            if (g_locDumps >= 3) return;
+            ++g_locDumps;
+            LOG("--- loc-string dump #%d: field @ %p ---", g_locDumps,
+                reinterpret_cast<void*>(structAddr));
+            DumpHex("field", structAddr, 32);
+            uintptr_t provider = 0;
+            if (!ReadPtr(structAddr, &provider) || provider < kMinPointer)
+            {
+                LOG("    provider pointer unreadable/bogus (%p)",
+                    reinterpret_cast<void*>(provider));
+                return;
+            }
+            LOG("    provider = %p", reinterpret_cast<void*>(provider));
+            DumpHex("prov ", provider, 48);
+            for (uintptr_t off = 0x08; off <= 0x28; off += 4)
+            {
+                uint32_t v = 0;
+                if (Read32(provider + off, &v))
+                    LOG("    provider+0x%02X = %u (0x%X)", off, v, v);
+            }
+        }
+
         bool LocString(uintptr_t structAddr, char* out, size_t n)
         {
+            DumpLocField(structAddr);
             if (!g_locMgrGlobal) return false;
             uintptr_t provider = 0;
             if (!ReadPtr(structAddr, &provider) || provider < kMinPointer) return false;
