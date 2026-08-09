@@ -1,7 +1,9 @@
-#pragma once
+﻿#pragma once
 #include <Windows.h>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
+#include <share.h>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -12,6 +14,13 @@ namespace trinity
     // actually renders the game calls EnableConsole), so the launcher process
     // that also loads the ASI stays silent. Lines logged before the console
     // exists are buffered and flushed into it on creation.
+    //
+    // The same lines are optionally mirrored to Trinity.log next to
+    // Trinity.asi (EnableFile). The console is transient - it dies with the
+    // game and cannot be scrolled back far - whereas signature-resolve
+    // failures, which are the single most useful thing this mod prints, all
+    // happen during startup. Having them on disk is what makes diagnosing a
+    // game patch possible after the fact.
     class Logger
     {
     public:
@@ -33,9 +42,56 @@ namespace trinity
             s_buffer.clear();
         }
 
+        // Mirror the log to Trinity.log next to Trinity.asi. Call this from the
+        // same place as EnableConsole (the process that presents) so the
+        // launcher's copy of the ASI never truncates the file we are writing.
+        // Buffered startup lines are replayed into the file WITHOUT clearing
+        // the buffer, so a later EnableConsole can still replay them too.
+        static void EnableFile()
+        {
+            std::lock_guard<std::mutex> lock(Mutex());
+            if (s_fileFp)
+                return;
+
+            // Resolve our own module (Trinity.asi) from the address of this
+            // function, so the logger keeps no dependency on Mod (which would
+            // be an include cycle: mod.cpp -> logger.h -> mod.h).
+            HMODULE self = nullptr;
+            if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                    reinterpret_cast<LPCSTR>(&EnableFile), &self))
+                return;
+
+            char path[MAX_PATH];
+            const DWORD n = GetModuleFileNameA(self, path, MAX_PATH);
+            if (n == 0 || n >= MAX_PATH)
+                return;
+
+            char* slash = std::strrchr(path, '\\');
+            if (!slash)
+                return;
+
+            const size_t left = sizeof(path) - static_cast<size_t>(slash + 1 - path);
+            if (snprintf(slash + 1, left, "Trinity.log") >= static_cast<int>(left))
+                return;
+
+            // _fsopen, not fopen_s: fopen_s opens EXCLUSIVE on MSVC, which
+            // makes the log unreadable while the game is running - exactly
+            // when you want to read it. _SH_DENYWR lets anyone tail the file
+            // and still keeps a second process from writing into it.
+            s_fileFp = _fsopen(path, "w", _SH_DENYWR);
+            if (!s_fileFp)
+                return;
+
+            for (const auto& line : s_buffer)
+                EmitFile(line);
+            std::fflush(s_fileFp);
+        }
+
         static void Shutdown()
         {
             std::lock_guard<std::mutex> lock(Mutex());
+            if (s_fileFp)  { std::fclose(s_fileFp); s_fileFp = nullptr; }
             if (s_conFp)   { fclose(s_conFp); s_conFp = nullptr; }
             if (s_console) { FreeConsole(); s_console = false; }
         }
@@ -58,6 +114,10 @@ namespace trinity
             line.text  = msg;
 
             std::lock_guard<std::mutex> lock(Mutex());
+
+            if (s_fileFp)
+                EmitFile(line);
+
             if (s_console)
             {
                 Emit(line);
@@ -95,6 +155,22 @@ namespace trinity
             std::fflush(stdout);
         }
 
+        // Plain-text mirror of Emit. No colour codes - the level is spelled out
+        // so the file stays greppable ("grep ERR Trinity.log").
+        static void EmitFile(const Line& l)
+        {
+            const char* tag = "INFO";
+            switch (l.lvl)
+            {
+            case Good:  tag = "OK  "; break;
+            case Warn:  tag = "WARN"; break;
+            case Error: tag = "ERR "; break;
+            default: break;
+            }
+            std::fprintf(s_fileFp, "%s [%s] %s\n", l.stamp.c_str(), tag, l.text.c_str());
+            std::fflush(s_fileFp); // a crash mid-hook must not eat the last line
+        }
+
         static std::mutex& Mutex()
         {
             static std::mutex m;
@@ -102,6 +178,7 @@ namespace trinity
         }
 
         static inline FILE*            s_conFp   = nullptr;
+        static inline FILE*            s_fileFp  = nullptr;
         static inline bool             s_console = false;
         static inline std::deque<Line> s_buffer;
     };

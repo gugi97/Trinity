@@ -125,6 +125,9 @@ namespace trinity::game
         uintptr_t g_strTableGlobal = 0;
         uintptr_t g_invTableGlobal = 0;
         uintptr_t g_locMgrGlobal   = 0;
+        // Read from the getter's own `mov edx,[rcx+disp8]` at load; the
+        // constant is only the fallback if the scan ever fails.
+        uint32_t  g_locProvOffset  = static_cast<uint32_t>(kOff_LocProv_Offset);
 
         // --- Global table overrides (Max Stack Size) --------------------------
         // Original per-row values, captured lazily the FIRST time a row is
@@ -266,7 +269,7 @@ namespace trinity::game
             uintptr_t provider = 0;
             if (!ReadPtr(structAddr, &provider) || provider < kMinPointer) return false;
             uint32_t off = 0;
-            if (!Read32(provider + kOff_LocProv_Offset, &off)) return false;
+            if (!Read32(provider + g_locProvOffset, &off)) return false;
             uintptr_t mgr = 0, blob = 0, data = 0;
             uint32_t  size = 0;
             if (!ReadPtr(g_locMgrGlobal, &mgr) || mgr < kMinPointer) return false;
@@ -1072,9 +1075,12 @@ namespace trinity::game
         // resolvers are byte-identical here (verified), differing only in which
         // global they load and which table-name string they pass - so the same
         // anchor finds both, selected by the name.
-        const uint8_t kItemPrologue[] = {
+        // -1 is a wildcard: see the note in teleport.cpp. The frame size moved
+        // 0x40 -> 0x50 in game 1.17.00 and took every *info table with it -
+        // item names, categories, icons, storage names.
+        const int16_t kItemPrologue[] = {
             0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18,
-            0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x40, 0x0F, 0xB7, 0x39,
+            0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC,   -1, 0x0F, 0xB7, 0x39,
             0x48, 0x8B, 0x1D,
         };
         uintptr_t FindItemPrologueAbove(uintptr_t lea)
@@ -1085,8 +1091,9 @@ namespace trinity::game
                 bool hit = true;
                 __try
                 {
-                    for (size_t i = 0; i < sizeof(kItemPrologue); ++i)
-                        if (*reinterpret_cast<const uint8_t*>(cand + i) != kItemPrologue[i]) { hit = false; break; }
+                    for (size_t i = 0; i < sizeof(kItemPrologue) / sizeof(kItemPrologue[0]); ++i)
+                        if (kItemPrologue[i] >= 0 &&
+                            *reinterpret_cast<const uint8_t*>(cand + i) != kItemPrologue[i]) { hit = false; break; }
                 }
                 __except (EXCEPTION_EXECUTE_HANDLER) { hit = false; }
                 if (hit) return cand;
@@ -1255,7 +1262,12 @@ namespace trinity::game
         // Real localised names (optional - falls back to prettified keys).
         const uintptr_t locGet = mem::FindPattern(kSig_LocStringGet);
         if (locGet)
-            g_locMgrGlobal = mem::ResolveRipAt(locGet + kOff_LocGet_MovGlobal, 7);
+        {
+            g_locMgrGlobal   = mem::ResolveRipAt(locGet + kOff_LocGet_MovGlobal, 7);
+            g_locProvOffset  = *reinterpret_cast<const uint8_t*>(locGet + kOff_LocGet_ProvDisp);
+            LOG("inventory: localisation getter @ %p, provider offset +0x%X.",
+                reinterpret_cast<void*>(locGet), g_locProvOffset);
+        }
         if (!g_locMgrGlobal)
             LOG_WARN("inventory: localisation table not found - items show prettified engine keys.");
 

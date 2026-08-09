@@ -458,7 +458,7 @@ namespace trinity::game
     inline constexpr const char* kStr_LevelNameTable = "FieldLevelNameTableInfo";
     inline constexpr const char* kSig_LeaR8Rip       = "4C 8D 05 ?? ?? ?? ??";
     inline constexpr const char* kSig_TableResolverPrologue =
-        "48 89 5C 24 10 48 89 6C 24 18 56 57 41 56 48 83 EC 40 8B 39 48 8B 1D";
+        "48 89 5C 24 10 48 89 6C 24 18 56 57 41 56 48 83 EC ?? 8B 39 48 8B 1D";
     // Within the prologue: +0x12 is `mov edi,[rcx]`, +0x14 the 7-byte
     // `mov rbx, cs:<registry global>` whose RIP operand we resolve.
     inline constexpr uintptr_t kOff_TableResolver_MovGlobal = 0x14;
@@ -1049,11 +1049,16 @@ namespace trinity::game
     // mapped Money_Copper to "Silver"; the game says "Copper").
     // Anchored on the getter itself: 0x22 bytes, unique, and its
     // `mov rax, cs:<locMgr>` sits at +0x03 (7-byte instruction).
+    // The provider field displacement (the `10` in `mov edx,[rcx+10h]`) is
+    // wildcarded: game 1.17.00 moved it to +0x18. We read the real byte out of
+    // the matched instruction at load instead of pinning either number, so a
+    // future reshuffle of the provider struct costs nothing.
     inline constexpr const char* kSig_LocStringGet =
-        "8B 51 10 48 8B 05 ? ? ? ? 48 8B 48 08 3B 51 08 72 08 "
+        "8B 51 ?? 48 8B 05 ? ? ? ? 48 8B 48 08 3B 51 08 72 08 "
         "48 8D 05 ? ? ? ? C3 48 8B C2 48 03 01 C3";
     inline constexpr uintptr_t kOff_LocGet_MovGlobal = 0x03; // mov rax, cs:<locMgr>
-    inline constexpr uintptr_t kOff_LocProv_Offset   = 0x10; // u32 offset into blob
+    inline constexpr uintptr_t kOff_LocGet_ProvDisp  = 0x02; // the disp8 byte itself
+    inline constexpr uintptr_t kOff_LocProv_Offset   = 0x18; // fallback only (1.17.00)
     inline constexpr uintptr_t kOff_LocMgr_Blob      = 0x08; // ptr -> blob
     inline constexpr uintptr_t kOff_LocBlob_Data     = 0x00; // char*
     inline constexpr uintptr_t kOff_LocBlob_Size     = 0x08; // u32 used bytes

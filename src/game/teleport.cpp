@@ -877,18 +877,24 @@ namespace trinity::game
         uintptr_t FindResolverPrologueAbove(uintptr_t lea, bool key16)
         {
             // Concrete prologue bytes of the resolver clone (kSig_TableResolverPrologue).
-            static const uint8_t kPrologue32[] = {
+            // -1 is a wildcard byte. The `sub rsp, imm8` frame size is the
+            // one field in this prologue the compiler re-picks between game
+            // builds - 0x40 at launch, 0x50 in 1.17.00 - and pinning it is
+            // what silently disabled fast travel on that patch. The rest of
+            // the clone is its identity and stays fixed.
+            static const int16_t kPrologue32[] = {
                 0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18,
-                0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x40, 0x8B, 0x39,
+                0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC,   -1, 0x8B, 0x39,
                 0x48, 0x8B, 0x1D,
             };
-            static const uint8_t kPrologue16[] = {
+            static const int16_t kPrologue16[] = {
                 0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x6C, 0x24, 0x18,
-                0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC, 0x40, 0x0F, 0xB7, 0x39,
+                0x56, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC,   -1, 0x0F, 0xB7, 0x39,
                 0x48, 0x8B, 0x1D,
             };
-            const uint8_t* pro = key16 ? kPrologue16 : kPrologue32;
-            const size_t   len = key16 ? sizeof(kPrologue16) : sizeof(kPrologue32);
+            const int16_t* pro = key16 ? kPrologue16 : kPrologue32;
+            const size_t   len = key16 ? sizeof(kPrologue16) / sizeof(kPrologue16[0])
+                                       : sizeof(kPrologue32) / sizeof(kPrologue32[0]);
             for (size_t back = 0x20; back <= kMax_LeaToPrologue; ++back)
             {
                 const uintptr_t cand = lea - back;
@@ -896,7 +902,8 @@ namespace trinity::game
                 __try
                 {
                     for (size_t i = 0; i < len; ++i)
-                        if (*reinterpret_cast<const uint8_t*>(cand + i) != pro[i]) { hit = false; break; }
+                        if (pro[i] >= 0 &&
+                            *reinterpret_cast<const uint8_t*>(cand + i) != pro[i]) { hit = false; break; }
                 }
                 __except (EXCEPTION_EXECUTE_HANDLER) { hit = false; }
                 if (hit) return cand;
