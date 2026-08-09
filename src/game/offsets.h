@@ -774,9 +774,21 @@ namespace trinity::game
     // TrItemValue ctor (IDB sub_1F86FD0): void f(itemVal, u16* typeId, i64 qty).
     // Self-contained - fills subtype/durability/flags/sub-lists from the item
     // def alone. Leaves the instance id as -1 for the caller to stamp.
+    // In 1.17.00 the prologue alone matches TWO functions and FindPattern
+    // returns the lower address - which is not this one, so the add path was
+    // calling an unrelated function with (itemVal, u16*, i64) and faulting on
+    // its first instruction (logged as "exception (built=0 planned=0)").
+    // Extended through the ctor's own opening writes, which are its identity
+    // and match the documented prototype exactly:
+    //     mov qword ptr [rcx], -1        ; instance id, left for the caller
+    //     movzx eax, word ptr [rdx]      ; typeId  (arg2, u16*)
+    //     mov word ptr [rcx+8], ax
+    //     mov qword ptr [rcx+0x10], r8   ; quantity (arg3, i64)
+    // Unique.
     inline constexpr const char* kSig_TrItemValueCtor =
         "48 89 5C 24 ? 48 89 4C 24 ? 55 56 57 41 54 41 55 41 56 41 57 48 8B EC "
-        "48 83 EC 60 4C 8B EA";
+        "48 83 EC 60 4C 8B EA 48 8B F1 48 C7 01 FF FF FF FF 0F B7 02 66 89 41 08 "
+        "4C 89 41 10";
     // Per-placement COMMIT (IDB sub_1CE1020):
     //     void* f(holder, int* outErr, void* unused, void* placement, u16 slotIdx)
     // Re-finds the bucket from the item's own def (+66) and calls sub_ED65670,
