@@ -723,7 +723,11 @@ namespace trinity::game
     // or writes 0x1A - sub_1CE8190 is its sole accessor.
     inline constexpr uintptr_t kOff_InvBucket_ExpandSlots = 0x1A; // u16, _varyExpandSlotCount
 
-    inline constexpr uintptr_t kInvSlot_Stride        = 0xC0; // 192-byte slots
+    // Same +8 as kItemVal_Size, and for the same reason - a slot IS a
+    // TrItemValue. Confirmed independently in the engine's own slot writer
+    // (reached from commit), which walks the live array with
+    // `imul rsi, rax, 0xC8`.
+    inline constexpr uintptr_t kInvSlot_Stride        = 0xC8; // 200-byte slots
     inline constexpr uintptr_t kOff_InvSlot_TypeId    = 0x08; // u16 item type id
     inline constexpr uintptr_t kOff_InvSlot_Quantity  = 0x10; // i64 quantity (edit here)
     inline constexpr uint16_t  kInvSlot_EmptyType     = 0xFFFF;
@@ -859,7 +863,13 @@ namespace trinity::game
     inline constexpr uintptr_t kOff_Sub_IdAllocator = 0x10; // (owner+0x68)+0x10 -> id allocator
     inline constexpr uintptr_t kOff_IdAlloc_Counter = 0x20; // i64, InterlockedIncrement64 target
 
-    inline constexpr uintptr_t kItemVal_Size        = 0xC0; // == kInvSlot_Stride
+    // 1.17.00: 0xC0 -> 0xC8. Measured from the ctor, which writes a qword at
+    // +0xC0, i.e. one past the end of the old 192-byte value. Passing it a
+    // 0xC0 stack buffer overran ours by exactly 8 bytes and tripped the /GS
+    // cookie - STATUS_STACK_BUFFER_OVERRUN (0xC0000409), which SEH cannot
+    // catch, so the __try around the add path could not save it and the
+    // process died with nothing logged.
+    inline constexpr uintptr_t kItemVal_Size        = 0xC8; // == kInvSlot_Stride
     inline constexpr uintptr_t kOff_ItemVal_InstanceId = 0x00; // i64 (-1 out of the ctor)
     inline constexpr uintptr_t kOff_ItemVal_Subtype    = 0x0A; // u16 (reconcile zeroes it)
     // 1.17.00 grew the placement record by 8 bytes (216 -> 224) and moved the

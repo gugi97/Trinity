@@ -2098,7 +2098,12 @@ namespace trinity::game
         int AddInRealm(uintptr_t holder, uintptr_t container, uintptr_t bucket,
                        uint16_t typeId, int64_t qty, int64_t id, const char* realm)
         {
-            alignas(16) uint8_t itemVal[kItemVal_Size] = {}; // ZEROED: the ctor
+            // Slack on purpose. The ctor writes kItemVal_Size bytes for THIS
+            // build; if a future patch grows the value again, the overflow
+            // lands in slack instead of the stack cookie - a /GS failure is
+            // not catchable and kills the process outright, which is how this
+            // was found. Only the first kItemVal_Size bytes are meaningful.
+            alignas(16) uint8_t itemVal[kItemVal_Size + 0x40] = {}; // ZEROED: the ctor
             // leaves holes (+0x0C, +0x3A, +0x54, +0x8A..) that would otherwise
             // reach the live slot - the game only gets away with an
             // uninitialised buffer because it copy-constructs first.
