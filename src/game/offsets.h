@@ -411,7 +411,11 @@ namespace trinity::game
     inline constexpr const char* kStr_GimmickSceneTable = "LevelGimmickSceneObjectInfo";
 
     inline constexpr uintptr_t kOff_Registry_SceneCount = 0x08; // u32
-    inline constexpr uintptr_t kOff_Registry_SceneTable = 0x50; // ptr[]
+    // Same +0x08 shift as kOff_ItemTable_Defs - this registry IS one of those
+    // tables, and its resolver walks +0x58 too. This one failed silently: the
+    // resolver still resolved, so nothing logged, but every scene descriptor
+    // read came off the wrong array.
+    inline constexpr uintptr_t kOff_Registry_SceneTable = 0x58; // ptr[]
     inline constexpr uintptr_t kOff_SceneDesc_NodeCount = 0x28; // u32
     inline constexpr uintptr_t kOff_SceneDesc_NodeArray = 0x20; // ptr
     inline constexpr uintptr_t kNode_Stride             = 0xC0;
@@ -868,7 +872,11 @@ namespace trinity::game
     inline constexpr const char* kStr_ItemInfoTable = "iteminfo";
     inline constexpr uintptr_t kOff_ItemResolver_MovGlobal = 0x15;
     inline constexpr uintptr_t kOff_ItemTable_Count = 0x08; // u32
-    inline constexpr uintptr_t kOff_ItemTable_Defs  = 0x50; // ptr[]
+    // 1.17.00 moved the row array one qword later (0x50 -> 0x58); the count
+    // at +0x08 did not move. Read out of the resolver clones themselves, which
+    // do `mov rax,[table+0x58]; mov rax,[row*8 + rax]` - all five resolvers we
+    // can reach by string anchor agree.
+    inline constexpr uintptr_t kOff_ItemTable_Defs  = 0x58; // ptr[]
     inline constexpr uintptr_t kOff_ItemDef_Key     = 0x08; // ptr -> string obj
 
     // --- Storages: what each bucket IS ---------------------------------------
