@@ -1383,11 +1383,17 @@ namespace trinity::game
 
     // Equip component layout (verified in THIS build from BatchEquip's own
     // table walk: `a1[17]` -> desc, `*(desc+8) + 200*i`, tag at +192).
-    inline constexpr uintptr_t kOff_EquipComp_Table  = 0x88; // -> table descriptor
+    // 1.17.00 moved the descriptor DOWN one qword, 0x88 -> 0x80. BatchEquip
+    // reads it twice and never touches +0x88 any more. Note the direction: this
+    // is the one field in this build that moved down rather than up.
+    inline constexpr uintptr_t kOff_EquipComp_Table  = 0x80; // -> table descriptor
     inline constexpr uintptr_t kOff_EquipTable_Array = 0x08; // entry[] base
     inline constexpr uintptr_t kOff_EquipTable_Count = 0x10; // u32
-    inline constexpr uintptr_t kEquipEntry_Stride    = 0xC8; // TrItemValue + u16 tag
-    inline constexpr uintptr_t kOff_EquipEntry_SlotTag = 0xC0; // u16 (helm 3, chest 4,
+    // 0xC8 -> 0xD0, following TrItemValue growing 0xC0 -> 0xC8: an entry is
+    // still a value plus a u16 tag, so it grew with it.
+    inline constexpr uintptr_t kEquipEntry_Stride    = 0xD0; // TrItemValue + u16 tag
+    // Sits immediately after the value, so it moved with it: 0xC0 -> 0xC8.
+    inline constexpr uintptr_t kOff_EquipEntry_SlotTag = 0xC8; // u16 (helm 3, chest 4,
                                                                // gloves 5, boots 6, cloak 16)
     // Within an entry, the TrItemValue fields reuse kOff_ItemVal_InstanceId /
     // kOff_InvSlot_TypeId / kOff_InvSlot_Quantity above, plus:
