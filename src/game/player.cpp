@@ -331,20 +331,25 @@ namespace trinity::game
                 if (!s_dumped)
                 {
                     s_dumped = true;
-                    char line[512];
-                    int w = snprintf(line, sizeof(line), "player: stat array @%p types:",
-                                     reinterpret_cast<void*>(c.statArray));
-                    for (int k = 0; k < 32; ++k)
+                    LOG("player: stat array @%p - raw qwords (entry 0 is health):",
+                        reinterpret_cast<void*>(c.statArray));
+                    // 0x140 bytes covers entry 0 plus the start of entry 1 for
+                    // any plausible stride, so the boundary is visible.
+                    for (uintptr_t off = 0; off < 0x140; off += 0x20)
                     {
-                        int32_t t = 0;
-                        const uintptr_t e = c.statArray + k * kSizeof_StatEntry;
-                        if (StatEntryType(e, &t))
-                            w += snprintf(line + w, sizeof(line) - w, " %d:%d", k, t);
-                        else
-                            w += snprintf(line + w, sizeof(line) - w, " %d:-", k);
-                        if (w > 460) break;
+                        char line[256];
+                        int w = snprintf(line, sizeof(line), "   +%03X:", (unsigned)off);
+                        for (uintptr_t q = 0; q < 0x20; q += 8)
+                        {
+                            uint64_t v = 0;
+                            if (Read64(c.statArray + off + q, &v))
+                                w += snprintf(line + w, sizeof(line) - w, " %016llX",
+                                              (unsigned long long)v);
+                            else
+                                w += snprintf(line + w, sizeof(line) - w, " ----------------");
+                        }
+                        LOG("%s", line);
                     }
-                    LOG("%s", line);
                 }
 
                 for (int k = 1; k < kStatArray_ScanEntries; ++k)
