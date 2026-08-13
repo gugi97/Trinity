@@ -222,6 +222,19 @@ namespace trinity::game
 
         // Smallest named box containing (x,z), with some vertical slack - the
         // game's own area name for a position.
+        // Called once, right after BuildAreaBoxes. Most LabelModes derive their
+        // text from the region name, so an empty table is indistinguishable
+        // from a labelling bug in the menu - it just shows raw engine keys.
+        void LogAreaBoxes()
+        {
+            if (g_areaBoxes.empty())
+                LOG_WARN("teleport: 0 named area boxes - waypoint labels will fall back "
+                         "to raw engine keys (FieldLevelNameTableInfo layout is stale).");
+            else
+                LOG("teleport: %zu named area boxes built (e.g. \"%s\").",
+                    g_areaBoxes.size(), g_areaBoxes.front().name.c_str());
+        }
+
         const AreaBox* AreaAt(float x, float y, float z)
         {
             const AreaBox* best = nullptr;
@@ -479,6 +492,7 @@ namespace trinity::game
                 return false;
 
             BuildAreaBoxes();
+            LogAreaBoxes();
 
             std::vector<TpCategory> cats;
 

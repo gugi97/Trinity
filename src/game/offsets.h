@@ -1368,9 +1368,19 @@ namespace trinity::game
     // literal 0x120 frame + arg shuffle (mov r12,r8; mov rsi,rdx). If a patch
     // resizes the frame, re-find via xrefs to the dye upsert (kSig_DyeUpsert)
     // from a ~0x550-byte function in the equip-component code region.
+    // 1.17.00 recompiled this with a much smaller frame - 0x120 down to 0x50 -
+    // and dropped the `lea rbp` entirely, which is why nothing matched even
+    // with the frame wildcarded. What did survive is the part the ABI fixes:
+    // the callee-saved push sequence and the three-argument shuffle
+    //     mov r12, r8    ; batch
+    //     mov rsi, rdx   ; outErr
+    //     mov r14, rcx   ; equip component
+    // which is exactly the prototype. Found by neighbourhood: it sits +0x10050
+    // from BatchEquip here, against +0x10380 in the analysed build, and it
+    // walks the same equip table. Unique.
     inline constexpr const char* kSig_DyeApplyBatch =
         "48 89 5C 24 ? 48 89 54 24 ? 55 56 57 41 54 41 55 41 56 41 57 "
-        "48 8D 6C 24 ? 48 81 EC 20 01 00 00 4D 8B E0 48 8B F2";
+        "48 83 EC ?? 4D 8B E0 48 8B F2 4C 8B F1";
 
     // The dye-record upsert primitive (IDB sub_1F8CB40):
     //     void f(void* itemVal, const uint8_t record[16])
