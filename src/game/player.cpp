@@ -327,30 +327,11 @@ namespace trinity::game
                 // read off a live game rather than assumed. Scans wider than
                 // kStatArray_ScanEntries so a gauge that moved further out is
                 // visible too.
-                static bool s_dumped = false;
-                if (!s_dumped)
-                {
-                    s_dumped = true;
-                    LOG("player: stat array @%p - raw qwords (entry 0 is health):",
-                        reinterpret_cast<void*>(c.statArray));
-                    // 0x140 bytes covers entry 0 plus the start of entry 1 for
-                    // any plausible stride, so the boundary is visible.
-                    for (uintptr_t off = 0; off < 0x140; off += 0x20)
-                    {
-                        char line[256];
-                        int w = snprintf(line, sizeof(line), "   +%03X:", (unsigned)off);
-                        for (uintptr_t q = 0; q < 0x20; q += 8)
-                        {
-                            uint64_t v = 0;
-                            if (Read64(c.statArray + off + q, &v))
-                                w += snprintf(line + w, sizeof(line) - w, " %016llX",
-                                              (unsigned long long)v);
-                            else
-                                w += snprintf(line + w, sizeof(line) - w, " ----------------");
-                        }
-                        LOG("%s", line);
-                    }
-                }
+                // One-shot: report which gauges the scan actually found, so a
+                // silent 'toggle does nothing' is distinguishable from a gauge
+                // the array does not carry.
+                static bool s_reported = false;
+                const int stamBefore = nStam, spirBefore = nSpir;
 
                 for (int k = 1; k < kStatArray_ScanEntries; ++k)
                 {
@@ -359,6 +340,13 @@ namespace trinity::game
                     if (!StatEntryType(e, &stt)) continue;
                     if (IsStaminaType(stt))     { if (nStam < kMaxStatEntries) g_stamEntries[nStam++].store(e, std::memory_order_release); }
                     else if (IsSpiritType(stt)) { if (nSpir < kMaxStatEntries) g_spiritEntries[nSpir++].store(e, std::memory_order_release); }
+                }
+
+                if (!s_reported)
+                {
+                    s_reported = true;
+                    LOG("player: stat scan over %d entries - %d stamina, %d spirit gauge(s).",
+                        kStatArray_ScanEntries, nStam - stamBefore, nSpir - spirBefore);
                 }
             }
 
