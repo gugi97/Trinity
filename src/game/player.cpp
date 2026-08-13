@@ -323,6 +323,30 @@ namespace trinity::game
                 // The stat entries form one contiguous 0x90-stride array with
                 // health first; scan it and record every stamina gauge (type 17 /
                 // sprint type 20) and spirit gauge (type 18 / pool type 21).
+                // One-shot: report the whole array so the gauge type ids can be
+                // read off a live game rather than assumed. Scans wider than
+                // kStatArray_ScanEntries so a gauge that moved further out is
+                // visible too.
+                static bool s_dumped = false;
+                if (!s_dumped)
+                {
+                    s_dumped = true;
+                    char line[512];
+                    int w = snprintf(line, sizeof(line), "player: stat array @%p types:",
+                                     reinterpret_cast<void*>(c.statArray));
+                    for (int k = 0; k < 32; ++k)
+                    {
+                        int32_t t = 0;
+                        const uintptr_t e = c.statArray + k * kSizeof_StatEntry;
+                        if (StatEntryType(e, &t))
+                            w += snprintf(line + w, sizeof(line) - w, " %d:%d", k, t);
+                        else
+                            w += snprintf(line + w, sizeof(line) - w, " %d:-", k);
+                        if (w > 460) break;
+                    }
+                    LOG("%s", line);
+                }
+
                 for (int k = 1; k < kStatArray_ScanEntries; ++k)
                 {
                     const uintptr_t e = c.statArray + k * kSizeof_StatEntry;

@@ -1407,8 +1407,12 @@ namespace trinity::game
                                                                // gloves 5, boots 6, cloak 16)
     // Within an entry, the TrItemValue fields reuse kOff_ItemVal_InstanceId /
     // kOff_InvSlot_TypeId / kOff_InvSlot_Quantity above, plus:
-    inline constexpr uintptr_t kOff_ItemVal_DyeData  = 0x70; // 16-byte record[]
-    inline constexpr uintptr_t kOff_ItemVal_DyeCount = 0x78; // u32
+    // +8 with TrItemValue (0xC0 -> 0xC8). The ctor zeroes the pair at +0x78 /
+    // +0x80, which is this vector. Reading it at +0x70 gave a wrong channel
+    // mask, so dyeing behaved as one colour for the whole item instead of the
+    // per-part channels the game exposes.
+    inline constexpr uintptr_t kOff_ItemVal_DyeData  = 0x78; // 16-byte record[]
+    inline constexpr uintptr_t kOff_ItemVal_DyeCount = 0x80; // u32
     inline constexpr uint32_t  kDye_MaxChannels      = 12;
 
     // --- Abyss Gear sockets (live-cracked 2026-07-18; see the abyss-gear note) -
@@ -1424,10 +1428,15 @@ namespace trinity::game
     // Witch-socket does); unlocking a NEW socket also grows a save-data sublist
     // inside the +0x58 target at +0xC0, which we do NOT reproduce - so unlocking
     // renders live but is not durable yet (see Equipment::UnlockAll).
-    inline constexpr uintptr_t kOff_ItemVal_SocketData     = 0x58; // -> record[] (target also has a save sublist @+0xC0)
-    inline constexpr uintptr_t kOff_ItemVal_SocketSize     = 0x60; // u32 vector size (always 5)
-    inline constexpr uintptr_t kOff_ItemVal_SocketCap      = 0x64; // u32 vector capacity (5)
-    inline constexpr uintptr_t kOff_ItemVal_SocketUnlocked = 0x68; // u32 unlocked-socket count = the real socket count
+    // +8 with TrItemValue. +0x58 is a plain u16 in this build - the ctor
+    // writes `mov word ptr [rcx+0x58], bx` - and the socket vector now starts
+    // at +0x60, which the ctor takes as a sub-object base with `lea rax,
+    // [rcx+0x60]`. Reading records from +0x58 produced garbage gear ids, which
+    // is why every socket displayed the same wrong item.
+    inline constexpr uintptr_t kOff_ItemVal_SocketData     = 0x60; // -> record[] (target also has a save sublist @+0xC8)
+    inline constexpr uintptr_t kOff_ItemVal_SocketSize     = 0x68; // u32 vector size (always 5)
+    inline constexpr uintptr_t kOff_ItemVal_SocketCap      = 0x6C; // u32 vector capacity (5)
+    inline constexpr uintptr_t kOff_ItemVal_SocketUnlocked = 0x70; // u32 unlocked-socket count = the real socket count
     inline constexpr uintptr_t kSocketRec_Stride           = 6;
     inline constexpr int       kSocket_Max                 = 5;    // absolute max (matches the vector capacity)
     // Record layout (6 bytes):
