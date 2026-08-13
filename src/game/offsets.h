@@ -100,17 +100,21 @@ namespace trinity::game
     enum StatType : int32_t
     {
         StatType_Health   = 0,
-        StatType_Stamina  = 17, // a stamina-typed gauge, but NOT the sprint one
-        StatType_Spirit   = 18, // internal spirit gauge - NOT the HUD bar
+        // 1.17.00 moved the whole gauge set up by five (17/18/20/21 ->
+        // 22/23/25/26); health stayed 0. Read off the commit funnel while
+        // playing: entry 12 committed as type 22 and entry 13 as type 23, and
+        // nothing in the old set ever appeared.
+        StatType_Stamina  = 22, // a stamina-typed gauge, but NOT the sprint one
+        StatType_Spirit   = 23, // internal spirit gauge - NOT the HUD bar
         // The gauge that actually depletes while sprinting. Found empirically:
         // it was the only array slot decreasing during a sprint (base 120000,
         // draining ~7000/s), and unlike the others it carries a real cap.
         // Type 17 pins full without stopping sprint; type 20 is the real gate.
-        StatType_SprintSt   = 20,
+        StatType_SprintSt   = 25,
         // The HUD Spirit bar. Type 18 is a partially-filled internal gauge that
         // never moves on screen; the displayed 0-30 pool (confirmed against the
         // in-game stat screen) is this type instead. Same trap as Stamina above.
-        StatType_SpiritPool = 21,
+        StatType_SpiritPool = 26,
     };
     // NOTE (movement speed): the player stat array also carries two "rate"
     // entries (type 30 and type 74) that rest at 100000 == 1.0x, but writing
