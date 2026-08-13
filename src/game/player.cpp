@@ -87,8 +87,13 @@ namespace trinity::game
                          "using %p with %d/%d votes - re-derive the anchors.",
                          distinct, reinterpret_cast<void*>(vals[best]), votes[best], matched);
             else if (matched < kN)
-                LOG_WARN("player: char-manager resolved from %d/%d anchors - the rest went "
-                         "stale on a game update and should be re-derived.", matched, kN);
+                // Not a failure: the anchors are redundant on purpose and the
+                // ones that matched agree, so the global is good. Logged at
+                // INFO so it stops being mistaken for the cause of unrelated
+                // problems - it is a heads-up for the next maintainer, not a
+                // symptom for a user to report.
+                LOG("player: char-manager resolved from %d/%d anchors (the others need "
+                    "re-deriving; features are unaffected).", matched, kN);
 
             return vals[best];
         }
