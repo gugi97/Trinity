@@ -73,7 +73,17 @@ namespace trinity::game
     inline constexpr uintptr_t kOff_StatEntry_Norm    = 0x20; // int64 current - base
     inline constexpr uintptr_t kOff_StatEntry_Floor   = 0x28; // int64 lower clamp
     inline constexpr uintptr_t kOff_StatEntry_Cap     = 0x30; // int64 max / cap
-    inline constexpr uintptr_t kSizeof_StatEntry      = 0x90; // stride between entries
+    // 1.17.00: 0x90 -> 0x98. There is not a single `imul reg, reg, 0x90` left
+    // in the module, while 0x98 appears throughout - including 16 sites that go
+    // on to touch this very layout (+0x18 base, +0x20 norm, +0x28 floor,
+    // +0x30 cap), which the fields above confirm is the stat entry.
+    //
+    // The failure this caused is a good example of a wrong stride looking like
+    // a dead feature: entry 0 (health) needs no stride, so God Mode kept
+    // working, while the k=1..15 scan that finds the stamina and spirit gauges
+    // landed mid-entry every time, read a garbage type, matched nothing, and
+    // left Infinite Stamina / Infinite Spirit silently inert.
+    inline constexpr uintptr_t kSizeof_StatEntry      = 0x98; // stride between entries
 
     // A character's stat entries form ONE contiguous 0x90-stride array with
     // health first (the pointer at root+0x58, i.e. [component+0x58]; entry i =
