@@ -382,35 +382,6 @@ namespace trinity::game
         {
             const uintptr_t e = reinterpret_cast<uintptr_t>(entry);
 
-            // --- one-shot identification of the entries actually committed ---
-            // Cheap: a bitmask of indices already reported, so each index logs
-            // once and the hot path stays a compare after that.
-            {
-                static std::atomic<uint64_t> s_seen{0};
-                const uintptr_t arr = g_hpEntries[0].load(std::memory_order_acquire);
-                if (arr && e >= arr)
-                {
-                    const uintptr_t d = e - arr;
-                    if (d % kSizeof_StatEntry == 0)
-                    {
-                        const uint64_t k = d / kSizeof_StatEntry;
-                        if (k < 40)
-                        {
-                            const uint64_t bit = 1ull << k;
-                            if (!(s_seen.fetch_or(bit, std::memory_order_relaxed) & bit))
-                            {
-                                int32_t t = 0;
-                                StatEntryType(e, &t);
-                                int64_t cur = 0;
-                                Read64(e + kOff_StatEntry_Current, &cur);
-                                LOG("player: commit on entry %llu (type %d, current %lld)",
-                                    (unsigned long long)k, t, (long long)cur);
-                            }
-                        }
-                    }
-                }
-            }
-
             const int64_t result = oStatCommit(entry, time, target, flag);
 
             const State& st = State::Get();
