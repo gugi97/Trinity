@@ -1,4 +1,5 @@
 #include "framework.h"
+#include "../core/logger.h"
 #include "ui_internal.h"
 #include "icons.h"
 
@@ -86,16 +87,47 @@ namespace trinity::ui
         ImGuiIO& io = ImGui::GetIO();
         char windir[MAX_PATH]{};
         GetWindowsDirectoryA(windir, MAX_PATH);
-        char path[MAX_PATH];
 
-        snprintf(path, sizeof(path), "%s\\Fonts\\segoeui.ttf", windir);
-        g_fontBody = io.Fonts->AddFontFromFileTTF(path, 21.0f * g_scale);
-        snprintf(path, sizeof(path), "%s\\Fonts\\seguisb.ttf", windir);
-        g_fontBold = io.Fonts->AddFontFromFileTTF(path, 21.0f * g_scale);
-        snprintf(path, sizeof(path), "%s\\Fonts\\segoeuib.ttf", windir);
-        g_fontTitle = io.Fonts->AddFontFromFileTTF(path, 30.0f * g_scale);
+        // Only ever pass ImGui a path that exists. Handing it a missing file
+        // raises an ImGui user error, and on a build with asserts enabled that
+        // happens before our null-check below can do anything - the atlas is
+        // left unfinished and the overlay never comes up at all. That is the
+        // SteamOS / Proton black screen: the Wine prefix carries no Microsoft
+        // fonts, so segoeui.ttf simply is not there.
+        auto tryFont = [&io, &windir](const char* const* names, float size) -> ImFont*
+        {
+            char path[MAX_PATH];
+            for (; *names; ++names)
+            {
+                snprintf(path, sizeof(path), "%s\\Fonts\\%s", windir, *names);
+                const DWORD attr = GetFileAttributesA(path);
+                if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
+                    continue;
+                if (ImFont* f = io.Fonts->AddFontFromFileTTF(path, size))
+                    return f;
+            }
+            return nullptr;
+        };
 
-        if (!g_fontBody)  g_fontBody  = io.Fonts->AddFontDefault();
+        // Segoe first (the intended look), then faces that exist on most
+        // prefixes, then nothing - AddFontDefault covers that below.
+        static const char* kBody[]  = { "segoeui.ttf",  "tahoma.ttf", "arial.ttf",
+                                        "DejaVuSans.ttf", nullptr };
+        static const char* kBold[]  = { "seguisb.ttf",  "arialbd.ttf", "tahomabd.ttf",
+                                        "DejaVuSans-Bold.ttf", nullptr };
+        static const char* kTitle[] = { "segoeuib.ttf", "arialbd.ttf", "tahomabd.ttf",
+                                        "DejaVuSans-Bold.ttf", nullptr };
+
+        g_fontBody  = tryFont(kBody,  21.0f * g_scale);
+        g_fontBold  = tryFont(kBold,  21.0f * g_scale);
+        g_fontTitle = tryFont(kTitle, 30.0f * g_scale);
+
+        if (!g_fontBody)
+        {
+            g_fontBody = io.Fonts->AddFontDefault();
+            LOG_WARN("gui: no system font found - using the built-in font. "
+                     "The menu works; it just looks plainer.");
+        }
         if (!g_fontBold)  g_fontBold  = g_fontBody;
         if (!g_fontTitle) g_fontTitle = g_fontBold;
         io.FontDefault = g_fontBody;
