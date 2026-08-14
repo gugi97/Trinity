@@ -125,8 +125,16 @@ namespace trinity::ui
         if (!g_fontBody)
         {
             g_fontBody = io.Fonts->AddFontDefault();
-            LOG_WARN("gui: no system font found - using the built-in font. "
-                     "The menu works; it just looks plainer.");
+            // The built-in font is a fixed 13px bitmap and does not scale with
+            // the UI, so on a 4K display it comes out close to unreadable.
+            // Scale it toward the size we asked for - blurrier than a real
+            // typeface, but legible, which matters more when it is the only
+            // font available.
+            if (g_fontBody)
+                g_fontBody->Scale = (21.0f * g_scale) / 13.0f;
+            LOG_WARN("gui: no system font found - using the built-in font at %.2fx. "
+                     "The menu works; it just looks plainer.",
+                     g_fontBody ? g_fontBody->Scale : 1.0f);
         }
         if (!g_fontBold)  g_fontBold  = g_fontBody;
         if (!g_fontTitle) g_fontTitle = g_fontBold;
