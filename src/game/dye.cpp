@@ -536,13 +536,12 @@ namespace trinity::game
             entry = FindEntryByTag(comp, req.tag);
             int64_t instId = 0;
             if (entry) Read64(entry + kOff_ItemVal_InstanceId, &instId);
-            bool durable = false;
-            if (entry && instId > 0)
-            {
-                uint8_t  recs[kDye_MaxChannels][16];
-                const uint32_t mask = ReadRecords(entry, recs);
-                durable = MirrorToServer(req.tag, instId, recs, mask);
-            }
+            // Server-side mirror disabled on 1.18.0. Writing the server copy's
+            // dye records - whether repointing the vector (crash) or overwriting
+            // in place (hang, the game loops reconciling the changed records) -
+            // is not safe on this build. Dye stays client-side: it applies and
+            // renders, but does not survive a reload. See the dye notes.
+            const bool durable = false;
 
             g_state.store(static_cast<int>(Dye::OpState::Done), std::memory_order_release);
         }
