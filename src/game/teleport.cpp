@@ -652,8 +652,10 @@ namespace trinity::game
         // Free Flight was dead on 1.17.00 for exactly that reason. If it goes
         // quiet again after a patch, re-derive it the same way: find the
         // stepper by signature, walk its callers, take the 0x9A4-byte one.
-        constexpr uintptr_t kAirMover_Lo = 0x2FF90A0;
-        constexpr uintptr_t kAirMover_Hi = 0x2FF90A0 + 0x9A4;  // 0x2FF9A44
+        // 1.18.0: moved again, same 0x9A4 length. Found the same way - the one
+        // caller of the loco-stepper whose size still matches exactly.
+        constexpr uintptr_t kAirMover_Lo = 0x3031FC0;
+        constexpr uintptr_t kAirMover_Hi = 0x3031FC0 + 0x9A4;  // 0x3032964
 
         // True on frames where Free Flight is actively driving the player's
         // vertical velocity (a direction key/button is held while airborne).

@@ -1154,7 +1154,7 @@ namespace trinity::game
     //   match+37: `vmovss xmm0, cs:dword_615A4F0`     (value; 8-byte instr)
     // IDB match at 0x8FC348. Unique block.
     inline constexpr const char* kSig_GameSpeed =
-        "80 3D ?? ?? ?? ?? 01 75 30 48 8B 4F 58 41 8B C7 C5 78 2F 59 64 0F 97 C0 "
+        "80 3D ?? ?? ?? ?? 01 75 30 48 8B 4F 58 41 8B C7 C5 78 2F 61 64 0F 97 C0 "
         "85 C0 74 09 80 3D ?? ?? ?? ?? 01 75 14 C5 FA 10 05 ?? ?? ?? ?? C5 FA 11 "
         "41 64 C6 05 ?? ?? ?? ?? 00";
     inline constexpr uintptr_t kOff_GameSpeed_FlagDisp    = 2;  // disp32 of cmp cs:byte_606B9CE,1
@@ -1187,7 +1187,7 @@ namespace trinity::game
     // followed by the two `vmovups ymm0, cs:<global>` (server if TLS[498], else
     // client). The two RIP operands resolve to the server and client globals.
     inline constexpr const char* kSig_FieldTimeRealm =
-        "BA F2 01 00 00 48 8B 08 0F B6 04 0A 84 C0 74 0A "
+        "BA F6 01 00 00 48 8B 08 0F B6 04 0A 84 C0 74 0A "
         "C5 FC 10 05 ?? ?? ?? ?? EB 08 C5 FC 10 05 ?? ?? ?? ??";
     // Within the match: server `vmovups` at +0x10, client `vmovups` at +0x1A;
     // each is 8 bytes (4-byte opcode C5 FC 10 05 + 4-byte disp at its tail).
@@ -1362,9 +1362,11 @@ namespace trinity::game
     // prologue through the arg shuffle (mov r15,r8; mov r12,rdx; mov r14,rcx;
     // mov r13,[rcx+8]); stack/frame immediates wildcarded. Unique.
     inline constexpr const char* kSig_EquipBatch =
+        // 1.18.0 re-allocated three registers in the arg shuffle; the shape is
+        // otherwise identical (r8->r12, rdx->r13, rcx->r14, [rcx+8]->r15).
         "48 89 5C 24 10 55 56 57 41 54 41 55 41 56 41 57 "
         "48 8D AC 24 ? ? ? ? B8 ? ? ? ? "
-        "E8 ? ? ? ? 48 2B E0 4D 8B F8 4C 8B E2 4C 8B F1 4C 8B 69 08";
+        "E8 ? ? ? ? 48 2B E0 4D 8B E0 4C 8B EA 4C 8B F1 4C 8B 79 08";
 
     // The client dye-ack applier (IDB sub_7D9C50):
     //     int* f(void* equipComponent, int* outErr, void* batch1960)
