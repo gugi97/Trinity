@@ -265,52 +265,6 @@ namespace trinity::game
         // text is interned lazily, and a string that has not been interned yet
         // stores -1, which fails the check and makes us fall back rather than
         // read a wild pointer.
-        // --- One-shot layout diagnostic (read-only) --------------------------
-        // Dumps the bytes behind a localised-string field the first few times
-        // it is used, so a moved struct member can be read off real memory
-        // instead of guessed. Guarded reads throughout; writes nothing.
-        int g_locDumps = 0;
-
-        void DumpHex(const char* what, uintptr_t addr, size_t len)
-        {
-            char line[160];
-            for (size_t o = 0; o < len; o += 16)
-            {
-                int w = snprintf(line, sizeof(line), "    %s +%02zX:", what, o);
-                for (size_t i = 0; i < 16 && o + i < len; ++i)
-                {
-                    uint8_t b = 0;
-                    if (!Read8(addr + o + i, &b)) { w += snprintf(line + w, sizeof(line) - w, " ??"); continue; }
-                    w += snprintf(line + w, sizeof(line) - w, " %02X", b);
-                }
-                LOG("%s", line);
-            }
-        }
-
-        void DumpLocField(uintptr_t structAddr)
-        {
-            if (g_locDumps >= 3) return;
-            ++g_locDumps;
-            LOG("--- loc-string dump #%d: field @ %p ---", g_locDumps,
-                reinterpret_cast<void*>(structAddr));
-            DumpHex("field", structAddr, 32);
-            uintptr_t provider = 0;
-            if (!ReadPtr(structAddr, &provider) || provider < kMinPointer)
-            {
-                LOG("    provider pointer unreadable/bogus (%p)",
-                    reinterpret_cast<void*>(provider));
-                return;
-            }
-            LOG("    provider = %p", reinterpret_cast<void*>(provider));
-            DumpHex("prov ", provider, 48);
-            for (uintptr_t off = 0x08; off <= 0x28; off += 4)
-            {
-                uint32_t v = 0;
-                if (Read32(provider + off, &v))
-                    LOG("    provider+0x%02X = %u (0x%X)", off, v, v);
-            }
-        }
-
         bool LocString(uintptr_t structAddr, char* out, size_t n)
         {
             if (!g_locMgrGlobal) return false;
@@ -327,55 +281,6 @@ namespace trinity::game
             if (!ReadPtr(mgr + g_locDataOffset, &data) || data < kMinPointer) return false;
             if (!ReadCString(data + off, out, n)) return false;
             return out[0] != 0;
-        }
-
-        // --- Field finder (read-only) ----------------------------------------
-        // Walk a data-table row and report every offset whose qword behaves
-        // like a localised-string provider: pointer -> u32 offset -> inside the
-        // interned blob -> non-empty text. Whichever offset prints a real name
-        // IS the field, for this build, without guessing.
-        int g_probes = 0;
-
-        void ProbeLocFields(const char* what, uintptr_t row, uintptr_t span = 0x200)
-        {
-            if (g_probes >= 4 || !g_locMgrGlobal) return;
-            ++g_probes;
-            LOG("--- loc-field probe (%s) row=%p ---", what,
-                reinterpret_cast<void*>(row));
-
-            uintptr_t mgr = 0, data = 0;
-            uint32_t  size = 0;
-            if (!ReadPtr(g_locMgrGlobal, &mgr) || mgr < kMinPointer) return;
-            if (!Read32(mgr + g_locSizeOffset, &size)) return;
-            if (!ReadPtr(mgr + g_locDataOffset, &data) || data < kMinPointer) return;
-            LOG("    blob data=%p size=%u", reinterpret_cast<void*>(data), size);
-
-            int found = 0;
-            for (uintptr_t off = 0; off <= span; off += 8)
-            {
-                uintptr_t provider = 0;
-                if (!ReadPtr(row + off, &provider) || provider < kMinPointer) continue;
-                // try the plausible displacements inside the provider
-                for (uintptr_t d = 0x08; d <= 0x28; d += 4)
-                {
-                    uint32_t o = 0;
-                    if (!Read32(provider + d, &o) || o >= size) continue;
-                    char buf[72];
-                    if (!ReadCString(data + o, buf, sizeof(buf)) || !buf[0]) continue;
-                    // ignore pure-digit ids - those are the field we already
-                    // know is not the name
-                    bool digits = true;
-                    for (const char* p = buf; *p; ++p)
-                        if (*p < '0' || *p > '9') { digits = false; break; }
-                    if (digits) continue;
-                    LOG("    row+0x%03X (prov+0x%02X) -> \"%s\"",
-                        static_cast<unsigned>(off), static_cast<unsigned>(d), buf);
-                    if (++found >= 24) return;
-                }
-            }
-            if (!found)
-                LOG("    no offset in the first 0x%X bytes resolves as localised text.",
-                    static_cast<unsigned>(span));
         }
 
         bool DisplayNameForType(uint16_t typeId, char* out, size_t n)

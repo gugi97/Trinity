@@ -440,9 +440,16 @@ namespace trinity::game
     inline constexpr uintptr_t kOff_Registry_SceneTable = 0x58; // ptr[]
     inline constexpr uintptr_t kOff_SceneDesc_NodeCount = 0x28; // u32
     inline constexpr uintptr_t kOff_SceneDesc_NodeArray = 0x20; // ptr
-    inline constexpr uintptr_t kNode_Stride             = 0xC0;
-    inline constexpr uintptr_t kOff_Node_Gimmick        = 0x10; // ptr -> gimmick object
-    inline constexpr uintptr_t kOff_Node_Position       = 0x6C; // f32 x,y,z
+    // 1.18.0: 0xC0 -> 0xC8. A known pointer in the node dump drifts exactly +8
+    // per node index, which is the stride being 8 short.
+    inline constexpr uintptr_t kNode_Stride             = 0xC8;
+    // Moved 0x10 -> 0x18: the per-node data pointer (which increments 0x20 per
+    // node in the dump) is at +0x18 in this build.
+    inline constexpr uintptr_t kOff_Node_Gimmick        = 0x18; // ptr -> gimmick object
+    // 1.18.0: 0x6C -> 0x74 (+8, with the node stride). Decoded from the dump:
+    // +0x74/+0x78/+0x7C read as a sane world triple (x large, y a plausible
+    // height, z), whereas +0x6C gave x=0 and a bogus height.
+    inline constexpr uintptr_t kOff_Node_Position       = 0x74; // f32 x,y,z
 
     // The scene descriptor is the reflected class LevelGimmickSceneObjectInfo
     // (112 bytes; field names recovered from its deserializer's error strings,

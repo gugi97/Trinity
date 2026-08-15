@@ -562,6 +562,7 @@ namespace trinity::game
                     float pos[3] = { 0.0f, 0.0f, 0.0f };
                     ReadVec3(node + kOff_Node_Position, pos);
 
+
                     // Raw per-node label, same source the manual mapping above
                     // was built from: the area-box name for a real fast-travel
                     // (_useTeleport) scene, or the gimmick's own string for a
