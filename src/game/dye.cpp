@@ -559,7 +559,7 @@ namespace trinity::game
 
         const uintptr_t upsert = mem::FindPattern(kSig_DyeUpsert);
         if (!upsert)
-            LOG_WARN("dye: upsert signature not found - dye will apply but not persist.");
+            LOG("dye: colours apply and render, but revert on reload on this game build.");
         g_dyeUpsert = reinterpret_cast<DyeUpsert_t>(upsert);
 
         if (!mem::InstallHook("dye: equip-batch", kSig_EquipBatch,

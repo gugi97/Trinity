@@ -301,8 +301,8 @@ namespace trinity::game
         // reload, exactly as it did before.
         g_refresh = reinterpret_cast<EquipRefresh_t>(mem::FindPattern(kSig_EquipEffectRefresh));
         if (!g_refresh)
-            LOG_WARN("equipment: effect-refresh signature not found - socketed gears "
-                     "will only take effect after a reload.");
+            LOG("equipment: effect-refresh signature not found - sockets still apply "
+                "and persist; only the live stat bonus may need a re-equip to show.");
         return true;
     }
 
