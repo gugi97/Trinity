@@ -269,54 +269,52 @@ namespace trinity::game
                 return false;
             }
 
-            // Overwrite the matching record in the server copy's dye vector, in
-            // place, byte for byte - the same direct write that makes socket
-            // edits persist. No game call, no allocation, so it does not depend
-            // on the upsert signature (which has not resolved since 1.17.00).
+            // The server copy usually has NO dye vector at all (data null,
+            // count 0), so there is nothing to overwrite. Give it a vector of
+            // our own instead: pack the applied channels into a mod-owned static
+            // buffer and point the server copy's vector fields at it.
             //
-            // A channel the server copy has no record for cannot be added this
-            // way (the vector would have to grow), so it is left visual-only -
-            // the same partial outcome the feature had before, but now the
-            // common case (re-dyeing existing channels) actually sticks.
-            uintptr_t data = 0;
-            uint32_t  count = 0;
-            if (!ReadPtr(entry + kOff_ItemVal_DyeData, &data) || data < kMinPointer)
-            {
-                LOG_WARN("dye: server copy has no dye vector for slot tag %u - "
-                         "dyed visually but will not survive a reload.", tag);
-                return false;
-            }
-            if (!Read32(entry + kOff_ItemVal_DyeCount, &count) || count == 0 ||
-                count > kDye_MaxChannels)
-            {
-                LOG_WARN("dye: server copy carries no dye records for slot tag %u - "
-                         "dyed visually but will not survive a reload.", tag);
-                return false;
-            }
+            // The buffer is static, never the client's heap allocation - sharing
+            // that would let either realm free it out from under the other. One
+            // buffer per equip slot; re-dyeing a slot reuses its buffer, so
+            // nothing accumulates.
+            static uint8_t  s_dyeStore[32][kDye_MaxChannels][16];
+            static uint16_t s_slotOf[32];
+            static int      s_slots = 0;
 
-            int wanted = 0, written = 0;
-            for (int ch = 0; ch < static_cast<int>(kDye_MaxChannels); ++ch)
+            int slot = -1;
+            for (int i = 0; i < s_slots; ++i)
+                if (s_slotOf[i] == tag) { slot = i; break; }
+            if (slot < 0)
             {
-                if (!(mask & (1u << ch))) continue;
-                ++wanted;
-                // Find the server record whose channel byte (+6) matches.
-                for (uint32_t i = 0; i < count; ++i)
+                if (s_slots >= 32)
                 {
-                    uint8_t rc = 0;
-                    if (!Read8(data + i * 16 + 6, &rc) || rc != ch) continue;
-                    bool ok = true;
-                    for (int b = 0; b < 16; ++b)
-                        ok &= Write8(data + i * 16 + b, recs[ch][b]);
-                    if (ok) ++written;
-                    break;
+                    LOG_WARN("dye: durable-store full - slot tag %u not persisted.", tag);
+                    return false;
                 }
+                slot = s_slots++;
+                s_slotOf[slot] = tag;
             }
 
-            if (written < wanted)
-                LOG("dye: slot tag %u - %d/%d channel(s) made durable "
-                    "(the rest are new channels the save copy cannot grow to hold).",
-                    tag, written, wanted);
-            return written > 0;
+            uint8_t (*buf)[16] = s_dyeStore[slot];
+            uint32_t nrec = 0;
+            for (int ch = 0; ch < static_cast<int>(kDye_MaxChannels); ++ch)
+                if (mask & (1u << ch))
+                    memcpy(buf[nrec++], recs[ch], 16);
+            if (nrec == 0) return false;
+
+            // Repoint the server copy's vector: data, count, capacity.
+            const uintptr_t bufAddr = reinterpret_cast<uintptr_t>(buf);
+            bool ok = true;
+            ok &= Write64(entry + kOff_ItemVal_DyeData,      static_cast<uint64_t>(bufAddr));
+            ok &= Write32(entry + kOff_ItemVal_DyeCount,     nrec);
+            ok &= Write32(entry + kOff_ItemVal_DyeCount + 4, nrec);  // capacity == count
+            if (!ok)
+            {
+                LOG_WARN("dye: could not repoint server vector for slot tag %u.", tag);
+                return false;
+            }
+            return true;
         }
 
         // --- The queued request --------------------------------------------
@@ -560,7 +558,7 @@ namespace trinity::game
 
         const uintptr_t upsert = mem::FindPattern(kSig_DyeUpsert);
         if (!upsert)
-            LOG_WARN("dye: upsert signature not found - dye will apply but not persist.");
+            LOG("dye: upsert signature not found - using the direct-write persist path instead.");
         g_dyeUpsert = reinterpret_cast<DyeUpsert_t>(upsert);
 
         if (!mem::InstallHook("dye: equip-batch", kSig_EquipBatch,
