@@ -269,23 +269,54 @@ namespace trinity::game
                 return false;
             }
 
-            uint8_t   oldFlag = 0;
-            const uintptr_t flagAddr = Inventory::RealmFlagAddress(&oldFlag);
-            if (!flagAddr)
+            // Overwrite the matching record in the server copy's dye vector, in
+            // place, byte for byte - the same direct write that makes socket
+            // edits persist. No game call, no allocation, so it does not depend
+            // on the upsert signature (which has not resolved since 1.17.00).
+            //
+            // A channel the server copy has no record for cannot be added this
+            // way (the vector would have to grow), so it is left visual-only -
+            // the same partial outcome the feature had before, but now the
+            // common case (re-dyeing existing channels) actually sticks.
+            uintptr_t data = 0;
+            uint32_t  count = 0;
+            if (!ReadPtr(entry + kOff_ItemVal_DyeData, &data) || data < kMinPointer)
             {
-                LOG_WARN("dye: realm flag unresolved - skipping the durable write.");
+                LOG_WARN("dye: server copy has no dye vector for slot tag %u - "
+                         "dyed visually but will not survive a reload.", tag);
                 return false;
             }
-            if (!RawWrite8(flagAddr, 1)) return false;
+            if (!Read32(entry + kOff_ItemVal_DyeCount, &count) || count == 0 ||
+                count > kDye_MaxChannels)
+            {
+                LOG_WARN("dye: server copy carries no dye records for slot tag %u - "
+                         "dyed visually but will not survive a reload.", tag);
+                return false;
+            }
 
-            Write32(entry + kOff_ItemVal_DyeCount, 0);
-            bool ok = true;
+            int wanted = 0, written = 0;
             for (int ch = 0; ch < static_cast<int>(kDye_MaxChannels); ++ch)
-                if (mask & (1u << ch))
-                    ok &= CallDyeUpsert(entry, recs[ch]);
+            {
+                if (!(mask & (1u << ch))) continue;
+                ++wanted;
+                // Find the server record whose channel byte (+6) matches.
+                for (uint32_t i = 0; i < count; ++i)
+                {
+                    uint8_t rc = 0;
+                    if (!Read8(data + i * 16 + 6, &rc) || rc != ch) continue;
+                    bool ok = true;
+                    for (int b = 0; b < 16; ++b)
+                        ok &= Write8(data + i * 16 + b, recs[ch][b]);
+                    if (ok) ++written;
+                    break;
+                }
+            }
 
-            RawWrite8(flagAddr, oldFlag); // never leave a game thread realm-flipped
-            return ok;
+            if (written < wanted)
+                LOG("dye: slot tag %u - %d/%d channel(s) made durable "
+                    "(the rest are new channels the save copy cannot grow to hold).",
+                    tag, written, wanted);
+            return written > 0;
         }
 
         // --- The queued request --------------------------------------------
