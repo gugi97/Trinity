@@ -394,8 +394,16 @@ namespace trinity::game
     //   char sub_505140(void* /*ignored*/, int sceneId, unsigned nodeIndex)
     // Prologue: mov rax,rsp; mov [rax+18],rbx; mov [rax+10],edx; mov [rax+8],rcx;
     // push rdi; sub rsp,80h. Unique in this build (IDB 0x505140).
+    // 1.18.0 recompiled the prologue: the arguments are now spilled straight to
+    // rsp instead of through rax, and it pushes rbp/rsi/rdi, so no amount of
+    // wildcarding the old shape matches. Identified by behaviour instead - it
+    // is the function that checks sceneId != -1, calls the gimmick scene
+    // resolver, and compares desc+0x28 (nodeCount) against its third argument
+    // before travelling, which is exactly the documented contract. The frame
+    // immediates are wildcarded; the arg shuffle and the sceneId test are not.
     inline constexpr const char* kSig_TravelToNode =
-        "48 8B C4 48 89 58 18 89 50 10 48 89 48 08 57 48 81 EC 80 00 00 00";
+        "48 89 5C 24 18 89 54 24 10 48 89 4C 24 08 55 56 57 48 8D 6C 24 ?? "
+        "48 81 EC ?? ?? ?? ?? 41 8B F8 33 DB 83 FA FF";
 
     // The destinations live in the LevelGimmickSceneObjectInfo registry, a global
     // (IDB qword_6185008), read through its resolver sub_396CC0(u32* sceneId)
