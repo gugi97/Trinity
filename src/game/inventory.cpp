@@ -128,6 +128,8 @@ namespace trinity::game
         // Read from the getter's own `mov edx,[rcx+disp8]` at load; the
         // constant is only the fallback if the scan ever fails.
         uint32_t  g_locProvOffset  = static_cast<uint32_t>(kOff_LocProv_Offset);
+        uint32_t  g_locSizeOffset  = static_cast<uint32_t>(kOff_LocMgr_Size);
+        uint32_t  g_locDataOffset  = static_cast<uint32_t>(kOff_LocMgr_Data);
 
         // --- Global table overrides (Max Stack Size) --------------------------
         // Original per-row values, captured lazily the FIRST time a row is
@@ -316,12 +318,13 @@ namespace trinity::game
             if (!ReadPtr(structAddr, &provider) || provider < kMinPointer) return false;
             uint32_t off = 0;
             if (!Read32(provider + g_locProvOffset, &off)) return false;
-            uintptr_t mgr = 0, blob = 0, data = 0;
+            // 1.18.0 inlined the blob into the manager: size and data now sit
+            // on the manager itself, one indirection fewer than before.
+            uintptr_t mgr = 0, data = 0;
             uint32_t  size = 0;
             if (!ReadPtr(g_locMgrGlobal, &mgr) || mgr < kMinPointer) return false;
-            if (!ReadPtr(mgr + kOff_LocMgr_Blob, &blob) || blob < kMinPointer) return false;
-            if (!Read32(blob + kOff_LocBlob_Size, &size) || off >= size) return false; // covers -1
-            if (!ReadPtr(blob + kOff_LocBlob_Data, &data) || data < kMinPointer) return false;
+            if (!Read32(mgr + g_locSizeOffset, &size) || off >= size) return false; // covers -1
+            if (!ReadPtr(mgr + g_locDataOffset, &data) || data < kMinPointer) return false;
             if (!ReadCString(data + off, out, n)) return false;
             return out[0] != 0;
         }
@@ -340,12 +343,11 @@ namespace trinity::game
             LOG("--- loc-field probe (%s) row=%p ---", what,
                 reinterpret_cast<void*>(row));
 
-            uintptr_t mgr = 0, blob = 0, data = 0;
+            uintptr_t mgr = 0, data = 0;
             uint32_t  size = 0;
             if (!ReadPtr(g_locMgrGlobal, &mgr) || mgr < kMinPointer) return;
-            if (!ReadPtr(mgr + kOff_LocMgr_Blob, &blob) || blob < kMinPointer) return;
-            if (!Read32(blob + kOff_LocBlob_Size, &size)) return;
-            if (!ReadPtr(blob + kOff_LocBlob_Data, &data) || data < kMinPointer) return;
+            if (!Read32(mgr + g_locSizeOffset, &size)) return;
+            if (!ReadPtr(mgr + g_locDataOffset, &data) || data < kMinPointer) return;
             LOG("    blob data=%p size=%u", reinterpret_cast<void*>(data), size);
 
             int found = 0;
@@ -1378,8 +1380,11 @@ namespace trinity::game
         {
             g_locMgrGlobal   = mem::ResolveRipAt(locGet + kOff_LocGet_MovGlobal, 7);
             g_locProvOffset  = *reinterpret_cast<const uint8_t*>(locGet + kOff_LocGet_ProvDisp);
-            LOG("inventory: localisation getter @ %p, provider offset +0x%X.",
-                reinterpret_cast<void*>(locGet), g_locProvOffset);
+            g_locSizeOffset  = *reinterpret_cast<const uint8_t*>(locGet + kOff_LocGet_SizeDisp);
+            g_locDataOffset  = *reinterpret_cast<const uint8_t*>(locGet + kOff_LocGet_DataDisp);
+            LOG("inventory: localisation getter @ %p (provider +0x%X, size +0x%X, data +0x%X).",
+                reinterpret_cast<void*>(locGet), g_locProvOffset,
+                g_locSizeOffset, g_locDataOffset);
         }
         if (!g_locMgrGlobal)
             LOG_WARN("inventory: localisation table not found - items show prettified engine keys.");

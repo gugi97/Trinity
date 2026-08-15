@@ -1132,15 +1132,24 @@ namespace trinity::game
     // wildcarded: game 1.17.00 moved it to +0x18. We read the real byte out of
     // the matched instruction at load instead of pinning either number, so a
     // future reshuffle of the provider struct costs nothing.
+    // 1.18.0 inlined the blob into the manager, so the getter lost a hop:
+    //   old  mgr -> blob = [mgr+8]; size = [blob+8]; data = [blob+0]
+    //   new  size = [mgr+0x68];     data = [mgr+0x60]
+    // Nothing about the old shape could match that, which is why wildcarding
+    // never found it. Every displacement below is read out of the matched code
+    // at load rather than pinned.
     inline constexpr const char* kSig_LocStringGet =
-        "8B 51 ?? 48 8B 05 ? ? ? ? 48 8B 48 08 3B 51 08 72 08 "
-        "48 8D 05 ? ? ? ? C3 48 8B C2 48 03 01 C3";
-    inline constexpr uintptr_t kOff_LocGet_MovGlobal = 0x03; // mov rax, cs:<locMgr>
-    inline constexpr uintptr_t kOff_LocGet_ProvDisp  = 0x02; // the disp8 byte itself
-    inline constexpr uintptr_t kOff_LocProv_Offset   = 0x18; // fallback only (1.17.00)
-    inline constexpr uintptr_t kOff_LocMgr_Blob      = 0x08; // ptr -> blob
-    inline constexpr uintptr_t kOff_LocBlob_Data     = 0x00; // char*
-    inline constexpr uintptr_t kOff_LocBlob_Size     = 0x08; // u32 used bytes
+        "8B 41 ?? 48 8B 0D ?? ?? ?? ?? 3B 41 ?? 72 08 "
+        "48 8D 05 ?? ?? ?? ?? C3 48 03 41 ?? C3";
+    inline constexpr uintptr_t kOff_LocGet_MovGlobal = 0x03; // mov r64, cs:<locMgr>
+    // Byte positions of the three displacements inside the match, all read at
+    // load. Fallbacks are 1.18.0 values and only used if a read fails.
+    inline constexpr uintptr_t kOff_LocGet_ProvDisp  = 0x02; // mov eax,[rcx+XX]
+    inline constexpr uintptr_t kOff_LocGet_SizeDisp  = 0x0C; // cmp eax,[rcx+XX]
+    inline constexpr uintptr_t kOff_LocGet_DataDisp  = 0x1A; // add rax,[rcx+XX]
+    inline constexpr uintptr_t kOff_LocProv_Offset   = 0x18; // fallback
+    inline constexpr uintptr_t kOff_LocMgr_Size      = 0x68; // fallback
+    inline constexpr uintptr_t kOff_LocMgr_Data      = 0x60; // fallback
 
     // --- World: Game Speed (fixed-timestep override) ------------------------
     // The engine's per-frame timing update (IDB sub_8FBD80) measures the real
