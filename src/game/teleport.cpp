@@ -130,13 +130,40 @@ namespace trinity::game
 
         // The gimmick object's first std::string (inline or heap) is the node's
         // sector key - the cheap per-node label for the POI browser.
+        // A name is only useful if it reads like one: letters, and not a bare
+        // number. Guards against latching onto an item code or a stray blob.
+        bool LooksLikeName(const char* s)
+        {
+            int letters = 0;
+            for (const char* p = s; *p; ++p)
+            {
+                const unsigned char c = static_cast<unsigned char>(*p);
+                if (c < 0x20 || c > 0x7E) return false;   // printable ASCII only
+                if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) ++letters;
+            }
+            return letters >= 3;
+        }
+
+        // The gimmick object is a run of string members. Trinity used to take
+        // the first qword as the name pointer; 1.18.0 moved it, which is why
+        // Shop waypoints degraded to "#0", "#1"... Scan the opening qwords for
+        // the first that points at something name-shaped instead of trusting a
+        // fixed position - a layout shift then costs nothing.
         std::string ReadNodeLabel(uintptr_t gimmick)
         {
             if (gimmick < kMinPointer) return std::string();
             char buf[80];
-            uintptr_t p = 0;
-            if (ReadPtr(gimmick, &p) && ReadCString(p, buf, sizeof(buf))) return std::string(buf);
-            if (ReadCString(gimmick, buf, sizeof(buf))) return std::string(buf);
+
+            for (uintptr_t off = 0; off <= 0x30; off += 8)
+            {
+                uintptr_t p = 0;
+                if (!ReadPtr(gimmick + off, &p) || p < kMinPointer) continue;
+                if (ReadCString(p, buf, sizeof(buf)) && LooksLikeName(buf))
+                    return std::string(buf);
+            }
+            // Inline string, no indirection.
+            if (ReadCString(gimmick, buf, sizeof(buf)) && LooksLikeName(buf))
+                return std::string(buf);
             return std::string();
         }
 

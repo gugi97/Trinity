@@ -98,11 +98,16 @@ namespace trinity::game
             return data;
         }
 
+        // The count is a single BYTE: the value ctor writes it with
+        // `mov byte ptr [rax+0x10], bl`. Reading a u32 here pulled in the three
+        // bytes after it, so the count came out large, clamped to the maximum,
+        // and every piece looked fully unlocked - which also hid the unlock
+        // option, since that only shows while the count is below the maximum.
         int UnlockedCount(uintptr_t entry)
         {
-            uint32_t n = 0;
-            if (!Read32(entry + kOff_ItemVal_SocketUnlocked, &n)) return 0;
-            return (n > static_cast<uint32_t>(kSocket_Max)) ? kSocket_Max : static_cast<int>(n);
+            uint8_t n = 0;
+            if (!Read8(entry + kOff_ItemVal_SocketUnlocked, &n)) return 0;
+            return (n > static_cast<uint8_t>(kSocket_Max)) ? kSocket_Max : static_cast<int>(n);
         }
 
         uint16_t GearAt(uintptr_t data, int i)
