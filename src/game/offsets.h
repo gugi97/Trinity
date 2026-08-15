@@ -831,8 +831,12 @@ namespace trinity::game
     // TrItemValue dtor (IDB sub_ED6DF40, via thunk sub_1F88270). Destroys the
     // sub-objects the ctor allocated; does NOT free the buffer itself.
     inline constexpr const char* kSig_TrItemValueDtor =
+        // 1.18.0: the trailing `mov edi, imm32` constant moved again (0x203 in
+        // the analysed build, 0x1FB now), so it is wildcarded rather than
+        // re-pinned. Located via the 0xC8-stride vector destructor that calls
+        // it, the same route as last time; it still reads value+0xC0.
         "48 89 5C 24 ? 48 89 74 24 ? 48 89 4C 24 ? 57 48 83 EC 20 48 89 CB 48 8B "
-        "89 ? ? ? ? BF 4D 8D C8 48 2B 3D";
+        "89 ? ? ? ? BF ? ? ? ? 31 F6";
 
     inline constexpr uintptr_t kOff_InvHolder_Container = 0x08; // holder+8 -> container
     // ItemInfo._defaultPushInventoryInfo - which storage this item goes to by
@@ -1558,8 +1562,12 @@ namespace trinity::game
     // pre-seeded there, so the first in-game gift/feed is already scaled and a
     // loaded save is never re-scaled. See the trinity-friendly-system notes.
     inline constexpr const char* kSig_FriendlySetNpc =
-        "49 89 E3 53 55 56 57 41 56 48 83 EC 60 48 89 D7 48 8D 69 18 "
-        "0F B7 42 04 66 41 89 43 08";
+        // 1.18.0 stopped baking the base offset in: where it used to be
+        // `lea rbp,[rcx+0x18]` it now loads a global, adjusts it, and does
+        // `lea rbp,[rcx+rax]`. Head and tail are unchanged and still anchor it,
+        // so only the computed middle is wildcarded.
+        "49 89 E3 53 55 56 57 41 56 48 83 EC 60 48 89 D7 8B 05 ? ? ? ? "
+        "2D ? ? ? ? 48 8D 2C 01 0F B7 42 04 66 41 89 43 08";
     inline constexpr const char* kSig_FriendlySetPet =
         "4C 8B DC 53 55 56 57 41 56 48 83 EC 60 48 8B FA 48 8D 69 38 "
         "0F B7 42 04 66 41 89 43 08";
