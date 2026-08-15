@@ -46,6 +46,9 @@ namespace trinity::game
         void*           g_equipTarget = nullptr;
         DyeApplyBatch_t g_dyeApply    = nullptr;
         DyeUpsert_t     g_dyeUpsert   = nullptr;
+        // If the durable mirror ever faults, it is disabled for the rest of the
+        // session so one bad write can never keep hitting the game.
+        bool            g_dyeMirrorDead = false;
 
         // The hook's captured component - a FALLBACK only (see ClientComp).
         // The hook fires for every equip batch the engine runs, in either
@@ -294,20 +297,28 @@ namespace trinity::game
                 return false;
             }
 
+            // Write ONLY the three RGB bytes (record +7/+8/+9) into the matching
+            // server record, leaving the group key, material, channel and the
+            // engine bookkeeping bytes exactly as the game left them. Replacing
+            // the whole record is what hung the game; this is the minimal write
+            // the reference table uses, and it does not.
             int wanted = 0, written = 0;
             for (int ch = 0; ch < static_cast<int>(kDye_MaxChannels); ++ch)
             {
                 if (!(mask & (1u << ch))) continue;
                 ++wanted;
-                // Find the server record whose channel byte (+6) matches.
                 for (uint32_t i = 0; i < count; ++i)
                 {
                     uint8_t rc = 0;
                     if (!Read8(data + i * 16 + 6, &rc) || rc != ch) continue;
+                    const uintptr_t a = data + i * 16;
                     bool ok = true;
-                    for (int b = 0; b < 16; ++b)
-                        ok &= Write8(data + i * 16 + b, recs[ch][b]);
-                    if (ok) ++written;
+                    ok &= Write8(a + 7, recs[ch][7]);   // R
+                    ok &= Write8(a + 8, recs[ch][8]);   // G
+                    ok &= Write8(a + 9, recs[ch][9]);   // B
+                    if (!ok) g_dyeMirrorDead = true;  // a bad write kills the path for the session
+                    uint8_t back = 0;
+                    if (ok && Read8(a + 7, &back) && back == recs[ch][7]) ++written;
                     break;
                 }
             }
@@ -536,12 +547,13 @@ namespace trinity::game
             entry = FindEntryByTag(comp, req.tag);
             int64_t instId = 0;
             if (entry) Read64(entry + kOff_ItemVal_InstanceId, &instId);
-            // Server-side mirror disabled on 1.18.0. Writing the server copy's
-            // dye records - whether repointing the vector (crash) or overwriting
-            // in place (hang, the game loops reconciling the changed records) -
-            // is not safe on this build. Dye stays client-side: it applies and
-            // renders, but does not survive a reload. See the dye notes.
-            const bool durable = false;
+            bool durable = false;
+            if (entry && instId > 0 && !g_dyeMirrorDead)
+            {
+                uint8_t  recs[kDye_MaxChannels][16];
+                const uint32_t mask = ReadRecords(entry, recs);
+                durable = MirrorToServer(req.tag, instId, recs, mask);
+            }
 
             g_state.store(static_cast<int>(Dye::OpState::Done), std::memory_order_release);
         }
@@ -559,7 +571,7 @@ namespace trinity::game
 
         const uintptr_t upsert = mem::FindPattern(kSig_DyeUpsert);
         if (!upsert)
-            LOG("dye: colours apply and render, but revert on reload on this game build.");
+            LOG("dye: persisting via direct RGB write (channels with an existing record survive a reload).");
         g_dyeUpsert = reinterpret_cast<DyeUpsert_t>(upsert);
 
         if (!mem::InstallHook("dye: equip-batch", kSig_EquipBatch,
