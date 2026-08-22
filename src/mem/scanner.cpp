@@ -167,6 +167,21 @@ namespace trinity::mem
         return hits.empty() ? 0 : hits.front();
     }
 
+    uintptr_t FindPatternAny(const std::string_view* patterns, size_t count,
+                             const ModuleRegion& mod, size_t* which)
+    {
+        for (size_t i = 0; i < count; ++i)
+        {
+            if (const uintptr_t hit = FindPattern(patterns[i], mod))
+            {
+                if (which) *which = i;
+                return hit;
+            }
+        }
+        if (which) *which = count;
+        return 0;
+    }
+
     uintptr_t FindPatternIf(std::string_view pattern, const ModuleRegion& mod,
                             bool (*visit)(uintptr_t match, void* ctx), void* ctx)
     {

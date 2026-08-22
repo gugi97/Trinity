@@ -4,6 +4,7 @@
 #include "settings.h"
 #include "state.h"
 #include "version.h"
+#include "gameversion.h"
 #include "../hooks/dx12_hook.h"
 #include "../game/player.h"
 #include "../game/teleport.h"
@@ -24,6 +25,9 @@ namespace trinity
         // Console is created lazily from the render path, so only the process
         // that actually presents the game gets one. Early logs buffer until then.
         LOG("Trinity v%s initializing (built %s %s).", TRINITY_VERSION, __DATE__, __TIME__);
+        // Name the game build before anything scans for it, so a log that ends
+        // in signature failures already says which build produced them.
+        LogGameVersion();
 
         // Restore last session's feature settings (Trinity.ini) before the
         // feature hooks install, so restored toggles apply from frame one.

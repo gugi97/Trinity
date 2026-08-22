@@ -2,6 +2,7 @@
 #include <Windows.h>
 #include <cstdint>
 #include <string_view>
+#include <initializer_list>
 
 namespace trinity::mem
 {
@@ -29,6 +30,22 @@ namespace trinity::mem
     // than only sections marked executable. Robust against odd section layouts.
     uintptr_t FindPattern(std::string_view pattern, const ModuleRegion& mod);
     inline uintptr_t FindPattern(std::string_view pattern) { return FindPattern(pattern, GameModule()); }
+
+    // Try several patterns in order and return the first that resolves, with
+    // `which` receiving the index that matched.
+    //
+    // A signature describes one build's code. When a patch reshapes a function,
+    // the old pattern stops matching even though the function is still there
+    // and still callable - and a single-pattern lookup turns that into a dead
+    // feature. Carrying the previous build's pattern alongside the current one
+    // costs a few microseconds at load and keeps the feature alive on both.
+    uintptr_t FindPatternAny(const std::string_view* patterns, size_t count,
+                             const ModuleRegion& mod, size_t* which = nullptr);
+    inline uintptr_t FindPatternAny(std::initializer_list<std::string_view> patterns,
+                                    size_t* which = nullptr)
+    {
+        return FindPatternAny(patterns.begin(), patterns.size(), GameModule(), which);
+    }
 
     // Count matches (up to `maxCount`) for a pattern - used to confirm a
     // signature is unique in the live build before trusting it.

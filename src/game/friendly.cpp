@@ -136,9 +136,14 @@ namespace trinity::game
     bool Friendly::Install()
     {
         // Non-fatal: only Trust Multiplier is lost if a setter doesn't resolve.
-        mem::InstallHook("friendly: NPC trust setter", kSig_FriendlySetNpc,
-                         "Trust Multiplier (NPCs) disabled",
-                         &hkSetNpc, &oSetNpc, &g_npcTarget);
+        // Two patterns: this build's, then 1.18.0's. This function's base
+        // offset has already flip-flopped between a constant and a runtime
+        // computation once, and each flip changes the body's LENGTH, so no
+        // single pattern spans both.
+        mem::InstallHookAny("friendly: NPC trust setter",
+                            { kSig_FriendlySetNpc, kSig_FriendlySetNpc_1180 },
+                            "Trust Multiplier (NPCs) disabled",
+                            &hkSetNpc, &oSetNpc, &g_npcTarget);
         mem::InstallHook("friendly: pet trust setter", kSig_FriendlySetPet,
                          "Trust Multiplier (pets/mounts) disabled",
                          &hkSetPet, &oSetPet, &g_petTarget);

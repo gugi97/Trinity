@@ -1598,6 +1598,15 @@ namespace trinity::game
         // anchor on the prologue alone, which is unique in the image and does
         // not care what the body does.
         "49 89 E3 53 55 56 57 41 56 48 83 EC 60 48 89 D7";
+
+    // The 1.18.0 shape of the same function, kept as a fallback. That build
+    // computed the base offset at runtime instead of baking it in, and since
+    // the constant has now flipped back once already, the old form is likely to
+    // return - carrying both costs nothing and keeps Trust Multiplier alive
+    // either way.
+    inline constexpr const char* kSig_FriendlySetNpc_1180 =
+        "49 89 E3 53 55 56 57 41 56 48 83 EC 60 48 89 D7 8B 05 ? ? ? ? "
+        "2D ? ? ? ? 48 8D 2C 01 0F B7 42 04 66 41 89 43 08";
     inline constexpr const char* kSig_FriendlySetPet =
         "4C 8B DC 53 55 56 57 41 56 48 83 EC 60 48 8B FA 48 8D 69 38 "
         "0F B7 42 04 66 41 89 43 08";

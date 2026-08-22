@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
+#include <initializer_list>
 
 #include <MinHook.h>
 
@@ -48,6 +49,40 @@ namespace trinity::mem
             return false;
         }
 
+        *target = t;
+        return true;
+    }
+
+    // InstallHook over a primary + fallback pattern list. Index 0 is the
+    // current build's pattern; anything after it is a previous build's, kept so
+    // one drifted signature degrades to "matched the older shape" instead of a
+    // dead feature. Logs which variant matched, because that is exactly the
+    // detail a post-patch bug report needs.
+    template <typename Fn>
+    bool InstallHookAny(const char* context, std::initializer_list<std::string_view> sigs,
+                        const char* consequence, Fn detour, Fn* original, void** target)
+    {
+        *target = nullptr;
+        size_t which = 0;
+        const uintptr_t addr = FindPatternAny(sigs, &which);
+        if (!addr)
+        {
+            LOG_ERR("%s signature NOT FOUND (tried %zu variants) - %s.",
+                    context, sigs.size(), consequence);
+            return false;
+        }
+        if (which > 0)
+            LOG_WARN("%s matched fallback pattern #%zu - this game build moved the "
+                     "current one, so please report it.", context, which);
+
+        void* t = reinterpret_cast<void*>(addr);
+        if (MH_CreateHook(t, reinterpret_cast<void*>(detour), reinterpret_cast<void**>(original)) != MH_OK ||
+            MH_EnableHook(t) != MH_OK)
+        {
+            LOG_ERR("%s: failed to install hook - %s.", context, consequence);
+            *original = nullptr;
+            return false;
+        }
         *target = t;
         return true;
     }
