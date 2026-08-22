@@ -261,6 +261,12 @@ namespace trinity::game
         // written back on disable. Lives here because this file owns the table
         // machinery, even though the feature belongs to the World menu.
         static bool SetNoBounty(bool enable);
+
+        // Hunt for the spendable-currency field by the figure shown on the HUD.
+        // Two passes of dumping likely-looking fields found nothing, so this
+        // takes the number the player can already read and searches for it
+        // instead. Read-only: it logs candidate addresses and writes nothing.
+        static void FindCurrency(int64_t shown);
         static bool SetAllSlotSizes(bool enable, int value);
 
         // Game-thread upkeep for the two overrides above: applies (or

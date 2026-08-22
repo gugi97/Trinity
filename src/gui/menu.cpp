@@ -1000,6 +1000,18 @@ namespace trinity::gui
         ui::Submenu("Add Item", "invadd", "Add any item in the game to your inventory.");
         ui::Submenu("Item Editor", "invedit", "Browse and edit what you're carrying.");
 
+        // Diagnostic, not a feature: type the figure the HUD shows and the log
+        // reports where that number lives. Two passes of guessing which field
+        // was money found nothing, so this asks the one question the game
+        // cannot answer for itself.
+        {
+            static int s_shown = 0;
+            if (ui::IntAction("Find My Silver", &s_shown, 0, 999999999, 1, 1000,
+                              "Type the amount your HUD shows, then press Enter. The log will "
+                              "report where that number is stored."))
+                game::Inventory::FindCurrency(s_shown);
+        }
+
         bool changed = false;
         if (ui::ToggleInt("Slot Size", &st.invSlotSize, &st.invSlotSizeVal,
                           1, 9999, 10, 2000,

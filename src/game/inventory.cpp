@@ -1681,6 +1681,78 @@ namespace trinity::game
         return g ? g->icon : "";
     }
 
+    void Inventory::FindCurrency(int64_t shown)
+    {
+        if (shown <= 0) { LOG_WARN("money/find: enter the amount shown on the HUD first."); return; }
+
+        const uintptr_t holder    = CurrentHolder();
+        const uintptr_t server    = ServerHolder();
+        uintptr_t       container = 0;
+        if (holder) ReadPtr(holder + kOff_InvHolder_Container, &container);
+        if (!holder && !container)
+        {
+            LOG_WARN("money/find: inventory not resolved yet - load in and open your bag once.");
+            return;
+        }
+
+        // The HUD shows two decimals, so the stored figure is very likely the
+        // amount in hundredths. Search the plain value too, and thousandths,
+        // rather than deciding in advance which it is.
+        const int64_t targets[] = { shown, shown * 100, shown * 1000 };
+        const double  approx    = static_cast<double>(shown);
+
+        struct Region { const char* name; uintptr_t base; };
+        const Region regions[] = {
+            { "holder",    holder    },
+            { "container", container },
+            { "server",    server    },
+        };
+
+        int hits = 0;
+        for (const Region& r : regions)
+        {
+            if (r.base < kMinPointer) continue;
+            for (uintptr_t off = 0; off <= 0x4000 && hits < 40; off += 4)
+            {
+                uint64_t v64 = 0;
+                if (!Read64(r.base + off, &v64)) break;
+                const uint32_t v32 = static_cast<uint32_t>(v64);
+
+                for (int t = 0; t < 3; ++t)
+                {
+                    const int64_t want = targets[t];
+                    if (static_cast<int64_t>(v64) == want || static_cast<int64_t>(v32) == want)
+                    {
+                        LOG("money/find: %s+%04X = %lld  (x%d)", r.name, (unsigned)off,
+                            static_cast<long long>(want), t == 0 ? 1 : (t == 1 ? 100 : 1000));
+                        ++hits;
+                        break;
+                    }
+                }
+
+                // Floating point, in case the balance really is fractional.
+                float f = 0.0f; double d = 0.0;
+                std::memcpy(&f, &v32, sizeof(f));
+                std::memcpy(&d, &v64, sizeof(d));
+                if (f > approx * 0.999 && f < approx * 1.001)
+                {
+                    LOG("money/find: %s+%04X = %.2f (float)", r.name, (unsigned)off, f);
+                    ++hits;
+                }
+                else if (d > approx * 0.999 && d < approx * 1.001)
+                {
+                    LOG("money/find: %s+%04X = %.2f (double)", r.name, (unsigned)off, d);
+                    ++hits;
+                }
+            }
+        }
+        if (hits == 0)
+            LOG_WARN("money/find: %lld not found near the inventory objects - the balance is "
+                     "held somewhere else entirely.", static_cast<long long>(shown));
+        else
+            LOG("money/find: %d candidate(s) for %lld.", hits, static_cast<long long>(shown));
+    }
+
     bool Inventory::SetNoBounty(bool enable)
     {
         // Resolved lazily: the table is not needed unless the feature is used.

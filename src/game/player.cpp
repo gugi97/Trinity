@@ -507,18 +507,27 @@ namespace trinity::game
                     // and no amount of reasoning from here settles which way
                     // they DO arrive. So describe each hit and let a real fall
                     // say what it looks like.
+                    // The field log settled it: a fall arrives WITH a source
+                    // actor, so "no attacker" was the wrong discriminator and
+                    // the block never ran. What a fall actually is, is damage
+                    // you inflict on yourself - the attacker is one of the
+                    // tracked player actors, and the victim is a player too.
+                    // An enemy hit never satisfies both.
+                    const bool selfInflicted =
+                        hasAttacker &&
+                        InSet(g_actors, kMaxPlayers, static_cast<uintptr_t>(src));
+
                     static int s_seen = 0;
                     if (s_seen < 10)
                     {
                         ++s_seen;
-                        LOG("player/damage: delta=%lld status=%u src=%p readable=%d "
-                            "actor=%llX attacker=%d",
+                        LOG("player/damage: delta=%lld status=%u actor=%llX attacker=%d self=%d%s",
                             static_cast<long long>(delta), statusId,
-                            reinterpret_cast<void*>(sourceCtx), srcReadable ? 1 : 0,
-                            static_cast<unsigned long long>(src), hasAttacker ? 1 : 0);
+                            static_cast<unsigned long long>(src), hasAttacker ? 1 : 0,
+                            selfInflicted ? 1 : 0, selfInflicted ? " - blocked" : "");
                     }
 
-                    if (!hasAttacker)
+                    if (selfInflicted)
                         return 0;
                 }
                 mult = st.dmgInMult;
