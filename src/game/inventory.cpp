@@ -1776,8 +1776,8 @@ namespace trinity::game
                 };
                 const int64_t a = static_cast<int64_t>(v64);
                 const int64_t b = static_cast<int64_t>(v32);
-                if (near(a, approx) || near(b, approx) ||
-                    near(a, approx * 100.0) || near(b, approx * 100.0))
+                if (closeTo(a, approx) || closeTo(b, approx) ||
+                    closeTo(a, approx * 100.0) || closeTo(b, approx * 100.0))
                 {
                     LOG("money/find: %s+%04X ~ %lld (near miss)", r.name, (unsigned)off,
                         static_cast<long long>(closeTo(a, approx) || closeTo(a, approx * 100.0) ? a : b));
