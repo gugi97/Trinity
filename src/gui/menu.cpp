@@ -1,3 +1,4 @@
+#include "../core/logger.h"
 #include "../core/i18n.h"
 #include "menu.h"
 
@@ -1736,6 +1737,15 @@ namespace trinity::gui
                 if (i18n::NeedsCjkGlyphs() != wasCjk)
                     ui::RequestFontRebuild();
             }
+        }
+
+        if (ui::Toggle("File Logging", &st.fileLogging,
+                       "Writes Trinity.log next to the mod. Leave this on unless you have a "
+                       "reason not to - without it a bug report has nothing to go on."))
+        {
+            if (st.fileLogging) trinity::Logger::EnableFile();
+            else                trinity::Logger::DisableFile();
+            save = true;
         }
 
         save |= ui::Toggle("Show FPS Counter", &st.showFps, "Shows your FPS in the corner of the screen.") && st.autoSave;

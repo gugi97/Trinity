@@ -56,6 +56,9 @@ namespace trinity
         char  language[8] = "en";
         // Accent colour theme index (0 = Crimson, the original look).
         int   themeIndex = 0;
+        // Trinity.log is what every bug report is diagnosed from, so this
+        // defaults to on; the menu says what switching it off costs.
+        bool  fileLogging = true;
 
         bool  oneHitKill = false;
         // Blocks HP loss that arrives with no attacker behind it - which is what

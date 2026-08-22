@@ -47,6 +47,20 @@ namespace trinity
         // launcher's copy of the ASI never truncates the file we are writing.
         // Buffered startup lines are replayed into the file WITHOUT clearing
         // the buffer, so a later EnableConsole can still replay them too.
+        // Stop writing Trinity.log and release the handle. Kept separate from
+        // Shutdown so the setting can be turned back on in the same session.
+        static void DisableFile()
+        {
+            std::lock_guard<std::mutex> lock(Mutex());
+            if (s_fileFp) { std::fclose(s_fileFp); s_fileFp = nullptr; }
+        }
+
+        static bool FileEnabled()
+        {
+            std::lock_guard<std::mutex> lock(Mutex());
+            return s_fileFp != nullptr;
+        }
+
         static void EnableFile()
         {
             std::lock_guard<std::mutex> lock(Mutex());
