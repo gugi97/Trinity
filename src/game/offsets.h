@@ -1106,6 +1106,11 @@ namespace trinity::game
     // exactly as before, it just adds nothing.
     inline constexpr const char* kStr_WantedInfoTable = "WantedInfo";
     inline constexpr uintptr_t kOff_WantedDef_IncreasePrice = 0x18; // i64
+    // The one field in the row not yet accounted for. Zeroing the price left the
+    // crime still registering - poster and region marker - so this is tried as
+    // an explicit experiment rather than a claim: same table, same session-only
+    // reach, fully restored on disable. If it changes nothing it costs nothing.
+    inline constexpr uintptr_t kOff_WantedDef_IsBlocked     = 0x10; // u8
     inline constexpr uint32_t  kWantedRows_Max = 4096; // sanity bound; the live table is ~35
     inline constexpr uintptr_t kOff_StrDef_Buffer  = 0x18; // ptr -> string obj
     inline constexpr uintptr_t kOff_ItemDef_Icons  = 0x90; // _itemIconList (vector)

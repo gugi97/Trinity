@@ -1704,10 +1704,12 @@ namespace trinity::game
             return false;
 
         static std::vector<int64_t> s_orig;
+        static std::vector<uint8_t> s_origBlocked;
         static std::vector<char>    s_captured;
         if (s_captured.size() != count)
         {
             s_orig.assign(count, 0);
+            s_origBlocked.assign(count, 0);
             s_captured.assign(count, 0);
         }
 
@@ -1722,20 +1724,30 @@ namespace trinity::game
                 if (!s_captured[row])
                 {
                     int64_t orig = 0;
+                    uint8_t blocked = 0;
                     if (!Read64(def + kOff_WantedDef_IncreasePrice, &orig)) continue;
+                    Read8(def + kOff_WantedDef_IsBlocked, &blocked);
                     s_orig[row] = orig;
+                    s_origBlocked[row] = blocked;
                     s_captured[row] = 1;
                 }
                 if (Write64(def + kOff_WantedDef_IncreasePrice, 0)) ++changed;
+                // Zeroing the price left the crime registering anyway, so also
+                // raise _isBlocked. Stated as an experiment in the log because
+                // that is what it is - the field name suggests it disables the
+                // entry, and nothing read so far proves it.
+                Write8(def + kOff_WantedDef_IsBlocked, 1);
             }
             else if (s_captured[row])
             {
                 if (Write64(def + kOff_WantedDef_IncreasePrice,
                             static_cast<uint64_t>(s_orig[row])))
                     ++changed;
+                Write8(def + kOff_WantedDef_IsBlocked, s_origBlocked[row]);
             }
         }
-        LOG("world: No Bounty %s on %d/%u wanted row(s).",
+        LOG("world: No Bounty %s on %d/%u wanted row(s) "
+            "(_increasePrice=0 plus _isBlocked=1, the latter still unproven).",
             enable ? "applied" : "reverted", changed, count);
         return changed > 0;
     }
