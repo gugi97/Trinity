@@ -516,6 +516,58 @@ namespace trinity::game
             return StringField(def + kOff_InvDef_Key, out, n);
         }
 
+        // Is this the Money storage? Identified by the engine's own key rather
+        // than a hardcoded number - offsets.h is explicit that the declared
+        // order of those keys is NOT the enum value.
+        bool store_is_money_key(uint16_t type)
+        {
+            char key[64];
+            if (!StorageKeyForType(type, key, sizeof(key))) return false;
+            return _stricmp(key, "Money") == 0;
+        }
+
+        // Dump anything on the holder or its container that could be a currency
+        // balance. Deliberately unfiltered by guesswork: every 32- and 64-bit
+        // field in range is printed, and the person holding the game decides
+        // which one matches what the HUD shows. Writes nothing.
+        void ProbeCurrency(uintptr_t holder, uint16_t moneyType)
+        {
+            uintptr_t container = 0;
+            ReadPtr(holder + kOff_InvHolder_Container, &container);
+            LOG("money/probe: holder=%p container=%p (Money storage type=%u)",
+                reinterpret_cast<void*>(holder), reinterpret_cast<void*>(container),
+                moneyType);
+
+            // A balance is a positive number large enough to be money and small
+            // enough not to be a pointer or a timestamp.
+            auto plausible = [](uint64_t v) { return v >= 100ull && v <= 2000000000ull; };
+
+            for (int which = 0; which < 2; ++which)
+            {
+                const uintptr_t base = which ? container : holder;
+                const char* what = which ? "container" : "holder";
+                if (base < kMinPointer) continue;
+
+                char line[512];
+                int w = snprintf(line, sizeof(line), "money/probe: %s candidates:", what);
+                int found = 0;
+                for (uintptr_t off = 0; off <= 0x300 && found < 20; off += 4)
+                {
+                    uint32_t v32 = 0;
+                    if (!Read32(base + off, &v32)) break;
+                    if (plausible(v32) && w < static_cast<int>(sizeof(line)) - 32)
+                    {
+                        w += snprintf(line + w, sizeof(line) - w, " +%03X=%u", (unsigned)off, v32);
+                        ++found;
+                    }
+                }
+                LOG("%s", line);
+            }
+            LOG("money/probe: compare these against the silver shown in game - "
+                "the one that matches is the balance.");
+        }
+
+
         bool StorageSlotsForType(uint16_t type, uint16_t* def_, uint16_t* max_)
         {
             uintptr_t def = 0;
@@ -1362,6 +1414,18 @@ namespace trinity::game
             uint16_t  scount = 0;
             if (!ReadPtr(bucket + kOff_InvBucket_Slots, &slots) || slots < kMinPointer) continue;
             if (!Read16(bucket + kOff_InvBucket_Count, &scount) || scount == 0 || scount > 8192) continue;
+
+            // --- Currency probe (READ ONLY, once per session) ----------------
+            // Runs when the Money storage comes past, because that is the point
+            // at which the holder and container behind it are known good.
+            {
+                static bool s_moneyProbed = false;
+                if (!s_moneyProbed && store_is_money_key(stype))
+                {
+                    s_moneyProbed = true;
+                    ProbeCurrency(holder, stype);
+                }
+            }
 
             Storage store{};
             store.type = stype;
