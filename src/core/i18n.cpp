@@ -127,7 +127,7 @@ namespace trinity::i18n
             }
             char line[1024];
             bool inLanguageHeader = false, first = true;
-            size_t n = 0;
+            size_t n = 0, candidates = 0;
             while (fgets(line, sizeof(line), f))
             {
                 std::string s(line);
@@ -139,18 +139,39 @@ namespace trinity::i18n
                     inLanguageHeader = (_stricmp(s.c_str(), "[Language]") == 0);
                     continue;
                 }
-                if (inLanguageHeader) continue;                // Name= / Code=, not text
                 // Split on the FIRST '=' so an English key containing '=' works.
                 const size_t eq = s.find('=');
                 if (eq == std::string::npos || eq == 0) continue;
                 std::string k = s.substr(0, eq), v = s.substr(eq + 1);
                 Trim(k); Trim(v);
+
+                // Only Name and Code belong to the [Language] header. Skipping
+                // EVERY line under that header - which is what this did before -
+                // silently discarded whole files, because the shipped ones put
+                // their translations straight after [Language] with no second
+                // section. Naming the two header keys instead means the format
+                // works with or without a section for the text, which is also
+                // what someone hand-editing one of these will expect.
+                if (inLanguageHeader &&
+                    (_stricmp(k.c_str(), "Name") == 0 || _stricmp(k.c_str(), "Code") == 0))
+                    continue;
+
+                ++candidates;
                 if (k.empty() || v.empty()) continue;          // blank = not translated yet
                 g_table[std::move(k)] = Intern(v);
                 ++n;
             }
             fclose(f);
-            LOG("localisation: loaded %zu translation(s) from %s", n, path.c_str());
+
+            // A file that parsed to nothing is a format problem, not a language
+            // with no translations - say so instead of sitting silently in
+            // English and letting it look like the switch did not work.
+            if (n == 0)
+                LOG_WARN("localisation: %s yielded no translations (%zu candidate line(s)) - "
+                         "check it is 'English text=translated text', UTF-8, one per line.",
+                         path.c_str(), candidates);
+            else
+                LOG("localisation: loaded %zu translation(s) from %s", n, path.c_str());
         }
     }
 
