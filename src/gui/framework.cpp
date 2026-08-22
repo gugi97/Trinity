@@ -1,3 +1,4 @@
+#include <atomic>
 #include "../core/i18n.h"
 #include "framework.h"
 #include "../core/logger.h"
@@ -81,10 +82,11 @@ namespace trinity::ui
     int CurrentTab() { return g_tab; }
 
     // --- Fonts / style --------------------------------------------------------
-    void InitStyle(float uiScale)
+    // Everything that populates the font atlas, in one place so it can be run
+    // again when the language changes. Assumes the caller has already cleared
+    // the atlas and will recreate the backend's device objects afterwards.
+    void BuildFonts()
     {
-        g_scale = uiScale < 0.5f ? 0.5f : uiScale;
-
         ImGuiIO& io = ImGui::GetIO();
         char windir[MAX_PATH]{};
         GetWindowsDirectoryA(windir, MAX_PATH);
@@ -184,6 +186,36 @@ namespace trinity::ui
         if (!g_fontBold)  g_fontBold  = g_fontBody;
         if (!g_fontTitle) g_fontTitle = g_fontBold;
         io.FontDefault = g_fontBody;
+    }
+
+    void InitStyle(float uiScale)
+    {
+        g_scale = uiScale < 0.5f ? 0.5f : uiScale;
+        BuildFonts();
+    }
+
+    // Set when the language changes to one that needs a different glyph set.
+    // The rebuild itself has to happen on the render thread between frames, so
+    // this only records that it is due; the present hook performs it.
+    std::atomic<bool> g_fontRebuildPending{false};
+
+    void RequestFontRebuild() { g_fontRebuildPending.store(true, std::memory_order_release); }
+
+    bool ConsumeFontRebuildRequest()
+    {
+        return g_fontRebuildPending.exchange(false, std::memory_order_acq_rel);
+    }
+
+    void RebuildFonts()
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        // Clear() frees every ImFont, so the cached pointers must not outlive it.
+        io.Fonts->Clear();
+        g_fontBody = g_fontBold = g_fontTitle = nullptr;
+        io.FontDefault = nullptr;
+        BuildFonts();
+        io.Fonts->Build();
+        LOG("gui: font atlas rebuilt for the current language.");
     }
 
     // --- Controller -----------------------------------------------------------

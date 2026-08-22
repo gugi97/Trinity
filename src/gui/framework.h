@@ -23,6 +23,14 @@ namespace trinity::ui
     // ImGui::CreateContext and before the first NewFrame.
     void InitStyle(float uiScale);
 
+    // Ask for the font atlas to be rebuilt (e.g. the language now needs CJK
+    // glyphs). Safe from any thread: it only raises a flag. The present hook
+    // calls ConsumeFontRebuildRequest() between frames and does the work, which
+    // is the only point where recreating the backend's device objects is safe.
+    void RequestFontRebuild();
+    bool ConsumeFontRebuildRequest();
+    void RebuildFonts();
+
     // Rising edge of the configured controller open combo on pad 0
     // (State::openPadMask - every bit of the mask must be held).
     bool PollToggleCombo();

@@ -766,6 +766,18 @@ namespace trinity::hooks
         if (!submitQueue)
             return;
 
+        // A language change can require a different glyph set. Rebuilding the
+        // atlas means tearing down and recreating the backend's font texture,
+        // which is only safe between frames - here, before NewFrame, on the
+        // render thread. Doing it from the menu (render thread too, but mid
+        // frame) would destroy resources the current frame still references.
+        if (ui::ConsumeFontRebuildRequest())
+        {
+            ImGui_ImplDX12_InvalidateDeviceObjects();
+            ui::RebuildFonts();
+            ImGui_ImplDX12_CreateDeviceObjects();
+        }
+
         ImGui_ImplDX12_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();

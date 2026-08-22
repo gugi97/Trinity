@@ -1696,12 +1696,24 @@ namespace trinity::gui
 
             int sel = i18n::CurrentLanguage();
             if (ui::Combo("Language", &sel, s_langNames, ln,
-                          "Menu language. Chinese, Japanese and Korean need a restart "
-                          "before their characters can be drawn."))
+                          "Menu language. Applies immediately."))
             {
+                const bool wasCjk = i18n::NeedsCjkGlyphs();
                 i18n::SetLanguage(sel);
                 snprintf(st.language, sizeof(st.language), "%s", i18n::LanguageCode(sel));
-                save = true;
+
+                // Save immediately rather than through autoSave. Every other
+                // setting can wait for a save, but this one is read back before
+                // the menu even exists (the font atlas is built from it), so
+                // leaving it unsaved made the language unusable for anyone with
+                // autoSave off - which is exactly what happened in testing.
+                Settings::Save();
+
+                // Latin and CJK need different glyph sets, so crossing that
+                // line means the atlas has to be rebuilt. Anything else is just
+                // different text in the glyphs already loaded.
+                if (i18n::NeedsCjkGlyphs() != wasCjk)
+                    ui::RequestFontRebuild();
             }
         }
 
