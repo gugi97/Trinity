@@ -1,3 +1,4 @@
+#include "../core/i18n.h"
 #include "menu.h"
 
 #include <imgui.h>
@@ -1684,6 +1685,25 @@ namespace trinity::gui
 
         ui::Submenu("Keybinds", "keybinds",
                    "Set the keyboard and controller binds for opening the menu and Free Flight.");
+
+        // Language. Built from the files actually installed, so it only appears
+        // when there is something to switch to.
+        if (i18n::LanguageCount() > 1)
+        {
+            static const char* s_langNames[16];
+            const int ln = i18n::LanguageCount() < 16 ? i18n::LanguageCount() : 16;
+            for (int i = 0; i < ln; ++i) s_langNames[i] = i18n::LanguageName(i);
+
+            int sel = i18n::CurrentLanguage();
+            if (ui::Combo("Language", &sel, s_langNames, ln,
+                          "Menu language. Chinese, Japanese and Korean need a restart "
+                          "before their characters can be drawn."))
+            {
+                i18n::SetLanguage(sel);
+                snprintf(st.language, sizeof(st.language), "%s", i18n::LanguageCode(sel));
+                save = true;
+            }
+        }
 
         save |= ui::Toggle("Show FPS Counter", &st.showFps, "Shows your FPS in the corner of the screen.") && st.autoSave;
 

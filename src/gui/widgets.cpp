@@ -1,3 +1,4 @@
+#include "../core/i18n.h"
 #include "widgets.h"
 #include "ui_internal.h"
 #include "icons.h"
@@ -48,6 +49,14 @@ namespace trinity::ui
     static RowResult RowBase(const char* label, const char* desc, RowKind kind,
                              const char* itemIcon = nullptr)
     {
+        // Every row in the menu passes through here, so translating at this one
+        // point covers the whole UI - no call site has to know localisation
+        // exists, and submenu IDs (separate parameters) can never be translated
+        // by accident. Labels built at runtime with snprintf simply will not
+        // match a key and stay English, which is the right outcome.
+        label = i18n::T(label);
+        desc  = i18n::T(desc);
+
         MenuState& ms = CurMS();
         const int  i  = g_rowIndex++;
         RowResult  r;

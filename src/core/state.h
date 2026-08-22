@@ -50,6 +50,11 @@ namespace trinity
         // being a separate mechanism: it just overrides the multiplier with one
         // large enough that any survivable hit is not. Kept as its own flag so
         // the slider is not silently rewritten behind the player's back.
+        // Menu language, stored as a code ("en", "id", "zh") rather than an
+        // index: the list is built from whatever files are installed, so an
+        // index would point at a different language the moment one is added.
+        char  language[8] = "en";
+
         bool  oneHitKill = false;
         float dmgOutMult = 1.0f; // player -> enemy
         float dmgInMult  = 1.0f; // enemy  -> player

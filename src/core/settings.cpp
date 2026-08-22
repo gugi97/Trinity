@@ -1,3 +1,4 @@
+#include "i18n.h"
 #include "settings.h"
 
 #include <Windows.h>
@@ -74,6 +75,7 @@ namespace trinity
             else if (!strcmp(key, "autoSave"))      vals.autoSave      = atoi(val) != 0;
             else if (!strcmp(key, "godMode"))       vals.godMode       = atoi(val) != 0;
             else if (!strcmp(key, "oneHitKill"))    vals.oneHitKill    = atoi(val) != 0;
+            else if (!strcmp(key, "language"))      snprintf(vals.language, sizeof(vals.language), "%s", val);
             else if (!strcmp(key, "infStamina"))    vals.infStamina    = atoi(val) != 0;
             else if (!strcmp(key, "infSpirit"))     vals.infSpirit     = atoi(val) != 0;
             else if (!strcmp(key, "dmgOutMult"))    vals.dmgOutMult    = strtof(val, nullptr);
@@ -122,6 +124,9 @@ namespace trinity
         // the file was hand-edited.
         st.godMode       = vals.godMode;
         st.oneHitKill    = vals.oneHitKill;
+        snprintf(st.language, sizeof(st.language), "%s", vals.language);
+        // Apply before the menu first draws, and before the font atlas is built.
+        i18n::SetLanguageByCode(st.language);
         st.infStamina    = vals.infStamina;
         st.infSpirit     = vals.infSpirit;
         st.dmgOutMult    = ClampF(vals.dmgOutMult, 0.0f, 20.0f);
@@ -184,6 +189,7 @@ namespace trinity
                 "autoSave=%d\n"
                 "godMode=%d\n"
                 "oneHitKill=%d\n"
+                "language=%s\n"
                 "infStamina=%d\n"
                 "infSpirit=%d\n"
                 "dmgOutMult=%.3f\n"
@@ -213,6 +219,7 @@ namespace trinity
                 st.autoSave ? 1 : 0,
                 st.godMode ? 1 : 0,
                 st.oneHitKill ? 1 : 0,
+                st.language,
                 st.infStamina ? 1 : 0,
                 st.infSpirit ? 1 : 0,
                 st.dmgOutMult,
@@ -252,6 +259,7 @@ namespace trinity
         State&      st = State::Get();
         st.godMode       = def.godMode;
         st.oneHitKill    = def.oneHitKill;
+        snprintf(st.language, sizeof(st.language), "%s", def.language);
         st.infStamina    = def.infStamina;
         st.infSpirit     = def.infSpirit;
         st.dmgOutMult    = def.dmgOutMult;
