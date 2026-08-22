@@ -2207,7 +2207,20 @@ namespace trinity::game
             // already logged WHICH stage refused, just above this line.
             LOG_WARN("inventory: add item %u x%lld PARTIAL (server=%d client=%d)",
                      typeId, static_cast<long long>(qty), okServer ? 1 : 0, okClient ? 1 : 0);
-            return okServer || okClient;
+
+            // Report success on the SERVER side only - which is what this
+            // function's contract above always said, but the code did not do.
+            // Returning true for a client-only add is what produced the field
+            // reports of items that sit in the inventory but cannot be equipped
+            // ("that item does not exist") and then vanish: the client copy is
+            // cosmetic, the reconcile deletes it, and the user was told it
+            // worked. A server-only add is the opposite case and genuinely did
+            // work - it is real in the save and shows after a reload.
+            if (okClient && !okServer)
+                LOG_WARN("inventory: add item %u reached the CLIENT only - it will look "
+                         "present but cannot be used, and the reconcile will remove it. "
+                         "Reporting this as a failure.", typeId);
+            return okServer;
         }
 
         // Bulk add ("add X of every item in a category"): the render thread queues

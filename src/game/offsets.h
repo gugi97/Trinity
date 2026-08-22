@@ -850,8 +850,13 @@ namespace trinity::game
         // the analysed build, 0x1FB now), so it is wildcarded rather than
         // re-pinned. Located via the 0xC8-stride vector destructor that calls
         // it, the same route as last time; it still reads value+0xC0.
-        "48 89 5C 24 ? 48 89 74 24 ? 48 89 4C 24 ? 57 48 83 EC 20 48 89 CB 48 8B "
-        "89 ? ? ? ? BF ? ? ? ? 31 F6";
+        // 1.18.02: a new `sub edi, dword [rip+..]` was inserted between the
+        // `mov edi, imm32` and the `xor esi, esi` the old pattern ended on, so
+        // it derailed right after the immediate. Pin the value+0xC0 read - that
+        // is the function's identity, and it is what the 0xC8-stride vector
+        // destructors call it for - and stop before the volatile tail.
+        "48 89 5C 24 ? 48 89 74 24 ? 48 89 4C 24 ? 57 48 83 EC 20 48 89 CB "
+        "48 8B 89 C0 00 00 00 BF";
 
     inline constexpr uintptr_t kOff_InvHolder_Container = 0x08; // holder+8 -> container
     // ItemInfo._defaultPushInventoryInfo - which storage this item goes to by
@@ -1586,12 +1591,13 @@ namespace trinity::game
     // pre-seeded there, so the first in-game gift/feed is already scaled and a
     // loaded save is never re-scaled. See the trinity-friendly-system notes.
     inline constexpr const char* kSig_FriendlySetNpc =
-        // 1.18.0 stopped baking the base offset in: where it used to be
-        // `lea rbp,[rcx+0x18]` it now loads a global, adjusts it, and does
-        // `lea rbp,[rcx+rax]`. Head and tail are unchanged and still anchor it,
-        // so only the computed middle is wildcarded.
-        "49 89 E3 53 55 56 57 41 56 48 83 EC 60 48 89 D7 8B 05 ? ? ? ? "
-        "2D ? ? ? ? 48 8D 2C 01 0F B7 42 04 66 41 89 43 08";
+        // This function's base offset keeps flip-flopping between builds:
+        // 1.18.0 replaced `lea rbp,[rcx+0x18]` with a global load plus
+        // `lea rbp,[rcx+rax]`, and 1.18.02 put the constant back. Because the
+        // middle changes LENGTH, no single pattern covers both forms - so
+        // anchor on the prologue alone, which is unique in the image and does
+        // not care what the body does.
+        "49 89 E3 53 55 56 57 41 56 48 83 EC 60 48 89 D7";
     inline constexpr const char* kSig_FriendlySetPet =
         "4C 8B DC 53 55 56 57 41 56 48 83 EC 60 48 8B FA 48 8D 69 38 "
         "0F B7 42 04 66 41 89 43 08";
