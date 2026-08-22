@@ -1686,6 +1686,22 @@ namespace trinity::gui
         ui::Submenu("Keybinds", "keybinds",
                    "Set the keyboard and controller binds for opening the menu and Free Flight.");
 
+        // Accent theme. Only the accent changes - the greys stay put, so no
+        // choice here can make the menu harder to read.
+        {
+            static const char* s_themeNames[8];
+            const int tn = ui::ThemeCount() < 8 ? ui::ThemeCount() : 8;
+            for (int i = 0; i < tn; ++i) s_themeNames[i] = ui::ThemeName(i);
+            int sel = st.themeIndex;
+            if (ui::Combo("Menu Theme", &sel, s_themeNames, tn,
+                          "Accent colour for the menu."))
+            {
+                st.themeIndex = sel;
+                ui::SetTheme(sel);
+                save = true;
+            }
+        }
+
         // Language. Built from the files actually installed, so it only appears
         // when there is something to switch to.
         if (i18n::LanguageCount() > 1)

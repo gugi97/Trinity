@@ -1,3 +1,4 @@
+#include "../gui/framework.h"
 #include "i18n.h"
 #include "settings.h"
 
@@ -76,6 +77,7 @@ namespace trinity
             else if (!strcmp(key, "godMode"))       vals.godMode       = atoi(val) != 0;
             else if (!strcmp(key, "oneHitKill"))    vals.oneHitKill    = atoi(val) != 0;
             else if (!strcmp(key, "language"))      snprintf(vals.language, sizeof(vals.language), "%s", val);
+            else if (!strcmp(key, "themeIndex"))    vals.themeIndex    = atoi(val);
             else if (!strcmp(key, "infStamina"))    vals.infStamina    = atoi(val) != 0;
             else if (!strcmp(key, "infSpirit"))     vals.infSpirit     = atoi(val) != 0;
             else if (!strcmp(key, "dmgOutMult"))    vals.dmgOutMult    = strtof(val, nullptr);
@@ -127,6 +129,8 @@ namespace trinity
         snprintf(st.language, sizeof(st.language), "%s", vals.language);
         // Apply before the menu first draws, and before the font atlas is built.
         i18n::SetLanguageByCode(st.language);
+        st.themeIndex = vals.themeIndex;
+        ui::SetTheme(st.themeIndex);
         st.infStamina    = vals.infStamina;
         st.infSpirit     = vals.infSpirit;
         st.dmgOutMult    = ClampF(vals.dmgOutMult, 0.0f, 20.0f);
@@ -190,6 +194,7 @@ namespace trinity
                 "godMode=%d\n"
                 "oneHitKill=%d\n"
                 "language=%s\n"
+                "themeIndex=%d\n"
                 "infStamina=%d\n"
                 "infSpirit=%d\n"
                 "dmgOutMult=%.3f\n"
@@ -220,6 +225,7 @@ namespace trinity
                 st.godMode ? 1 : 0,
                 st.oneHitKill ? 1 : 0,
                 st.language,
+                st.themeIndex,
                 st.infStamina ? 1 : 0,
                 st.infSpirit ? 1 : 0,
                 st.dmgOutMult,
@@ -260,6 +266,8 @@ namespace trinity
         st.godMode       = def.godMode;
         st.oneHitKill    = def.oneHitKill;
         snprintf(st.language, sizeof(st.language), "%s", def.language);
+        st.themeIndex = def.themeIndex;
+        ui::SetTheme(st.themeIndex);
         st.infStamina    = def.infStamina;
         st.infSpirit     = def.infSpirit;
         st.dmgOutMult    = def.dmgOutMult;

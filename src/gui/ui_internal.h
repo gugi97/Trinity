@@ -8,12 +8,20 @@
 namespace trinity::ui
 {
     // --- Theme (Crimson Desert: deep reds on near-black) ---------------------
+    // The four accent colours are mutable so a theme can be chosen at runtime.
+    // Deliberately NOT constexpr any more, and deliberately still named the
+    // same: every reader across the menu keeps working unchanged, which is
+    // about thirty call sites that would otherwise all have to be rewritten.
+    //
+    // The greys below stay fixed. They are what makes the menu recognisable,
+    // and holding them constant means no theme can ever produce unreadable
+    // text - the only thing a theme changes is the accent.
     namespace theme
     {
-        inline constexpr ImU32 HeaderTop  = IM_COL32(128,  10,  26, 255);
-        inline constexpr ImU32 HeaderBot  = IM_COL32( 52,   4,  12, 255);
-        inline constexpr ImU32 Accent     = IM_COL32(214,  36,  56, 255);
-        inline constexpr ImU32 AccentDark = IM_COL32(120,  14,  30, 255);
+        inline ImU32 HeaderTop  = IM_COL32(128,  10,  26, 255);
+        inline ImU32 HeaderBot  = IM_COL32( 52,   4,  12, 255);
+        inline ImU32 Accent     = IM_COL32(214,  36,  56, 255);
+        inline ImU32 AccentDark = IM_COL32(120,  14,  30, 255);
         inline constexpr ImU32 RowBg      = IM_COL32( 13,  13,  16, 234);
         inline constexpr ImU32 BarBg      = IM_COL32(  7,   7,   9, 245);
         inline constexpr ImU32 CrumbBg    = IM_COL32( 10,  10,  12, 245);

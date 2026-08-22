@@ -350,6 +350,59 @@ namespace trinity::game
                 }
             }
 
+            // --- Mount-stamina survey (READ ONLY) ---------------------------
+            // Which non-player characters carry a stamina gauge, and what do
+            // they call themselves? Logged once per distinct class so mounting
+            // a horse produces exactly one line, and only while the survey is
+            // still incomplete - it costs nothing after that.
+            {
+                constexpr int kMaxSurveyed = 6;
+                static uint64_t s_seenVt[kMaxSurveyed]{};
+                static int      s_seen = 0;
+
+                for (uint32_t i = 0; i < count && s_seen < kMaxSurveyed; ++i)
+                {
+                    uint64_t ch = 0;
+                    if (!Read64(static_cast<uintptr_t>(data) + 8ull * i, &ch) || ch < kMinPointer)
+                        continue;
+                    const uintptr_t owner = static_cast<uintptr_t>(ch);
+                    uint64_t vt = 0;
+                    if (!Read64(owner, &vt) || vt < kMinPointer) continue;
+                    if (vt == anchorVt) continue;                 // that is a protagonist
+
+                    bool already = false;
+                    for (int k = 0; k < s_seen; ++k)
+                        if (s_seenVt[k] == vt) { already = true; break; }
+                    if (already) continue;
+
+                    SelfChain mc;
+                    if (!WalkSelfChain(owner, &mc)) continue;     // no vital chain
+
+                    // Collect this character's gauge types.
+                    int  stamCount = 0;
+                    char types[128] = "";
+                    int  w = 0;
+                    for (int k = 0; k < kStatArray_ScanEntries; ++k)
+                    {
+                        const uintptr_t e = mc.statArray + k * kSizeof_StatEntry;
+                        int32_t stt = 0;
+                        if (!StatEntryType(e, &stt)) continue;
+                        if (IsStaminaType(stt)) ++stamCount;
+                        if (w < static_cast<int>(sizeof(types)) - 8)
+                            w += snprintf(types + w, sizeof(types) - w, "%d ", stt);
+                    }
+                    if (stamCount == 0) continue;                 // only care about stamina owners
+
+                    uint32_t objTypeRaw = 0xFFFFFFFFu;
+                    Read32(owner + kOff_Owner_ObjectType, &objTypeRaw);
+                    const int32_t objType = static_cast<int32_t>(objTypeRaw);
+
+                    s_seenVt[s_seen++] = vt;
+                    LOG("player/mount-survey: objType=%d vtable=%llX stamina-gauges=%d types=[%s]",
+                        objType, static_cast<unsigned long long>(vt), stamCount, types);
+                }
+            }
+
             // Clear any trailing slots from a previous tick so a stale entry
             // pointer can never accidentally match after a transition/swap.
             for (int i = nPlayers; i < kMaxPlayers; ++i)

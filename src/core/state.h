@@ -54,6 +54,8 @@ namespace trinity
         // index: the list is built from whatever files are installed, so an
         // index would point at a different language the moment one is added.
         char  language[8] = "en";
+        // Accent colour theme index (0 = Crimson, the original look).
+        int   themeIndex = 0;
 
         bool  oneHitKill = false;
         float dmgOutMult = 1.0f; // player -> enemy

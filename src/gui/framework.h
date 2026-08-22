@@ -23,6 +23,11 @@ namespace trinity::ui
     // ImGui::CreateContext and before the first NewFrame.
     void InitStyle(float uiScale);
 
+    // Accent colour themes. Index 0 is Crimson, the original look.
+    int         ThemeCount();
+    const char* ThemeName(int index);
+    void        SetTheme(int index);
+
     // Ask for the font atlas to be rebuilt (e.g. the language now needs CJK
     // glyphs). Safe from any thread: it only raises a flag. The present hook
     // calls ConsumeFontRebuildRequest() between frames and does the work, which

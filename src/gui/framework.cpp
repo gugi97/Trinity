@@ -194,6 +194,52 @@ namespace trinity::ui
         BuildFonts();
     }
 
+    // --- Themes ---------------------------------------------------------------
+    namespace
+    {
+        struct Theme
+        {
+            const char* name;
+            ImU32 headerTop, headerBot, accent, accentDark;
+        };
+
+        // Each entry is one hue at four depths: a bright accent for selection
+        // and focus, a darker one for its shadow side, and the header gradient.
+        // Values are picked to sit at a similar brightness so no theme is
+        // noticeably harder to read than the others.
+        constexpr Theme kThemes[] = {
+            { "Crimson", IM_COL32(128, 10, 26, 255), IM_COL32( 52,  4, 12, 255),
+                         IM_COL32(214, 36, 56, 255), IM_COL32(120, 14, 30, 255) },
+            { "Cyan",    IM_COL32(  8, 88,104, 255), IM_COL32(  3, 38, 46, 255),
+                         IM_COL32( 34,190,214, 255), IM_COL32( 12, 96,112, 255) },
+            { "Purple",  IM_COL32( 78, 26,128, 255), IM_COL32( 34, 10, 56, 255),
+                         IM_COL32(166, 86,232, 255), IM_COL32( 86, 34,132, 255) },
+            { "Emerald", IM_COL32( 10, 96, 54, 255), IM_COL32(  4, 42, 24, 255),
+                         IM_COL32( 42,198,118, 255), IM_COL32( 14,104, 62, 255) },
+            { "Gold",    IM_COL32(126, 92,  8, 255), IM_COL32( 54, 38,  3, 255),
+                         IM_COL32(226,176, 44, 255), IM_COL32(126, 94, 16, 255) },
+            { "Orange",  IM_COL32(132, 58,  8, 255), IM_COL32( 56, 24,  3, 255),
+                         IM_COL32(238,124, 38, 255), IM_COL32(132, 64, 14, 255) },
+        };
+    }
+
+    int ThemeCount() { return static_cast<int>(sizeof(kThemes) / sizeof(kThemes[0])); }
+
+    const char* ThemeName(int i)
+    {
+        return (i >= 0 && i < ThemeCount()) ? kThemes[i].name : kThemes[0].name;
+    }
+
+    void SetTheme(int i)
+    {
+        if (i < 0 || i >= ThemeCount()) i = 0;
+        const Theme& t = kThemes[i];
+        theme::HeaderTop  = t.headerTop;
+        theme::HeaderBot  = t.headerBot;
+        theme::Accent     = t.accent;
+        theme::AccentDark = t.accentDark;
+    }
+
     // Set when the language changes to one that needs a different glyph set.
     // The rebuild itself has to happen on the render thread between frames, so
     // this only records that it is due; the present hook performs it.
