@@ -78,6 +78,7 @@ namespace trinity
             else if (!strcmp(key, "oneHitKill"))    vals.oneHitKill    = atoi(val) != 0;
             else if (!strcmp(key, "noFallDamage"))  vals.noFallDamage  = atoi(val) != 0;
             else if (!strcmp(key, "easyParry"))     vals.easyParry     = atoi(val) != 0;
+            else if (!strcmp(key, "noBounty"))      vals.noBounty      = atoi(val) != 0;
             else if (!strcmp(key, "language"))      snprintf(vals.language, sizeof(vals.language), "%s", val);
             else if (!strcmp(key, "themeIndex"))    vals.themeIndex    = atoi(val);
             else if (!strcmp(key, "fileLogging"))   vals.fileLogging   = atoi(val) != 0;
@@ -131,6 +132,7 @@ namespace trinity
         st.oneHitKill    = vals.oneHitKill;
         st.noFallDamage  = vals.noFallDamage;
         st.easyParry     = vals.easyParry;
+        st.noBounty      = vals.noBounty;
         snprintf(st.language, sizeof(st.language), "%s", vals.language);
         // Apply before the menu first draws, and before the font atlas is built.
         i18n::SetLanguageByCode(st.language);
@@ -202,6 +204,7 @@ namespace trinity
                 "oneHitKill=%d\n"
                 "noFallDamage=%d\n"
                 "easyParry=%d\n"
+                "noBounty=%d\n"
                 "language=%s\n"
                 "themeIndex=%d\n"
                 "fileLogging=%d\n"
@@ -236,6 +239,7 @@ namespace trinity
                 st.oneHitKill ? 1 : 0,
                 st.noFallDamage ? 1 : 0,
                 st.easyParry ? 1 : 0,
+                st.noBounty ? 1 : 0,
                 st.language,
                 st.themeIndex,
                 st.fileLogging ? 1 : 0,
@@ -280,6 +284,7 @@ namespace trinity
         st.oneHitKill    = def.oneHitKill;
         st.noFallDamage  = def.noFallDamage;
         st.easyParry     = def.easyParry;
+        st.noBounty      = def.noBounty;
         snprintf(st.language, sizeof(st.language), "%s", def.language);
         st.themeIndex = def.themeIndex;
         ui::SetTheme(st.themeIndex);

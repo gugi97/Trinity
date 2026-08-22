@@ -682,6 +682,14 @@ namespace trinity::gui
         // step the amount (held: x10), Enter types an exact one, then the same
         // press applies it (see ui::IntAction).
         static int s_advHours = 1;
+        if (ui::Toggle("No Bounty", &st.noBounty,
+                       "Crimes stop adding to your bounty. Applies while the game is running; "
+                       "it changes no save data."))
+        {
+            game::Inventory::SetNoBounty(st.noBounty);
+            changed = true;
+        }
+
         if (ui::IntAction("Advance Time", &s_advHours, 1, 240, 1, 1,
                    timeReady
                        ? "Skips the clock forward by this many hours; time keeps flowing after."

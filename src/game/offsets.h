@@ -1093,6 +1093,20 @@ namespace trinity::game
     // already populated at load (live-checked: 38 of 38 items, zero nulls), so
     // this stays a pure pointer walk and never calls into the game.
     inline constexpr const char* kStr_StringInfoTable = "stringinfo";
+
+    // --- Wanted level -------------------------------------------------------
+    // "WantedInfo" is a standalone string referenced by three lea-r8 sites, the
+    // same shape every other table resolver anchors on.
+    //
+    // _increasePrice is how much a crime adds to your bounty. Its offset came
+    // from the engine's own deserialiser: the Korean parse-failure message
+    // naming WantedInfo::_increasePrice is referenced from one place, and the
+    // read it belongs to is `lea rdx,[rdi+0x18]` with a size of 8. Zeroing it
+    // on every row means no crime raises the bounty - the game keeps working
+    // exactly as before, it just adds nothing.
+    inline constexpr const char* kStr_WantedInfoTable = "WantedInfo";
+    inline constexpr uintptr_t kOff_WantedDef_IncreasePrice = 0x18; // i64
+    inline constexpr uint32_t  kWantedRows_Max = 4096; // sanity bound; the live table is ~35
     inline constexpr uintptr_t kOff_StrDef_Buffer  = 0x18; // ptr -> string obj
     inline constexpr uintptr_t kOff_ItemDef_Icons  = 0x90; // _itemIconList (vector)
     inline constexpr uintptr_t kOff_IconData_Path  = 0x00; // u16 -> stringinfo row

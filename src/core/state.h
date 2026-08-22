@@ -66,6 +66,8 @@ namespace trinity
         bool  noFallDamage = false;
         // Drops the parry timing-margin test; the overlap requirement stays.
         bool  easyParry = false;
+        // Zeroes every wanted row's bounty increase; session-only, data table.
+        bool  noBounty = false;
         float dmgOutMult = 1.0f; // player -> enemy
         float dmgInMult  = 1.0f; // enemy  -> player
 

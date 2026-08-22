@@ -253,6 +253,14 @@ namespace trinity::game
         // toggle behaves like every other one in the mod rather than leaving
         // anything permanently stomped.
         static bool SetAllMaxStackSizes(bool enable, int64_t value);
+
+        // No Bounty: zero every WantedInfo row's _increasePrice so committing a
+        // crime adds nothing to your bounty. Writes the game's DATA TABLE, which
+        // is rebuilt from the paks each launch, so this is session-only and
+        // cannot reach a save. Originals are captured on the first enable and
+        // written back on disable. Lives here because this file owns the table
+        // machinery, even though the feature belongs to the World menu.
+        static bool SetNoBounty(bool enable);
         static bool SetAllSlotSizes(bool enable, int value);
 
         // Game-thread upkeep for the two overrides above: applies (or

@@ -1650,6 +1650,65 @@ namespace trinity::game
         return g ? g->icon : "";
     }
 
+    bool Inventory::SetNoBounty(bool enable)
+    {
+        // Resolved lazily: the table is not needed unless the feature is used.
+        static uintptr_t s_wantedGlobal = 0;
+        static bool      s_looked = false;
+        if (!s_looked)
+        {
+            s_looked = true;
+            s_wantedGlobal = FindTableGlobal(kStr_WantedInfoTable);
+            LOG(s_wantedGlobal ? "world: WantedInfo table @ %p - No Bounty available."
+                               : "world: WantedInfo table not found - No Bounty disabled.",
+                reinterpret_cast<void*>(s_wantedGlobal));
+        }
+        if (!s_wantedGlobal) return false;
+
+        uintptr_t table = 0;
+        if (!ReadPtr(s_wantedGlobal, &table)) return false;
+        uint32_t count = 0;
+        if (!Read32(table + kOff_ItemTable_Count, &count) || count == 0 ||
+            count > kWantedRows_Max)
+            return false;
+
+        static std::vector<int64_t> s_orig;
+        static std::vector<char>    s_captured;
+        if (s_captured.size() != count)
+        {
+            s_orig.assign(count, 0);
+            s_captured.assign(count, 0);
+        }
+
+        int changed = 0;
+        for (uint32_t row = 0; row < count; ++row)
+        {
+            uintptr_t def = 0;
+            if (!DefForRow(s_wantedGlobal, static_cast<uint16_t>(row), &def)) continue;
+
+            if (enable)
+            {
+                if (!s_captured[row])
+                {
+                    int64_t orig = 0;
+                    if (!Read64(def + kOff_WantedDef_IncreasePrice, &orig)) continue;
+                    s_orig[row] = orig;
+                    s_captured[row] = 1;
+                }
+                if (Write64(def + kOff_WantedDef_IncreasePrice, 0)) ++changed;
+            }
+            else if (s_captured[row])
+            {
+                if (Write64(def + kOff_WantedDef_IncreasePrice,
+                            static_cast<uint64_t>(s_orig[row])))
+                    ++changed;
+            }
+        }
+        LOG("world: No Bounty %s on %d/%u wanted row(s).",
+            enable ? "applied" : "reverted", changed, count);
+        return changed > 0;
+    }
+
     bool Inventory::SetAllMaxStackSizes(bool enable, int64_t value)
     {
         if (!g_itemTableGlobal) return false;
