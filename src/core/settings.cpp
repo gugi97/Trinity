@@ -73,6 +73,7 @@ namespace trinity
             else if (!strcmp(key, "flyDownPadMask")) vals.flyDownPadMask = static_cast<unsigned int>(strtoul(val, nullptr, 0));
             else if (!strcmp(key, "autoSave"))      vals.autoSave      = atoi(val) != 0;
             else if (!strcmp(key, "godMode"))       vals.godMode       = atoi(val) != 0;
+            else if (!strcmp(key, "oneHitKill"))    vals.oneHitKill    = atoi(val) != 0;
             else if (!strcmp(key, "infStamina"))    vals.infStamina    = atoi(val) != 0;
             else if (!strcmp(key, "infSpirit"))     vals.infSpirit     = atoi(val) != 0;
             else if (!strcmp(key, "dmgOutMult"))    vals.dmgOutMult    = strtof(val, nullptr);
@@ -120,6 +121,7 @@ namespace trinity
         // Clamp the floats to the same ranges the menu rows enforce, in case
         // the file was hand-edited.
         st.godMode       = vals.godMode;
+        st.oneHitKill    = vals.oneHitKill;
         st.infStamina    = vals.infStamina;
         st.infSpirit     = vals.infSpirit;
         st.dmgOutMult    = ClampF(vals.dmgOutMult, 0.0f, 20.0f);
@@ -181,6 +183,7 @@ namespace trinity
                 "flyDownPadMask=%u\n"
                 "autoSave=%d\n"
                 "godMode=%d\n"
+                "oneHitKill=%d\n"
                 "infStamina=%d\n"
                 "infSpirit=%d\n"
                 "dmgOutMult=%.3f\n"
@@ -209,6 +212,7 @@ namespace trinity
                 st.flyDownPadMask,
                 st.autoSave ? 1 : 0,
                 st.godMode ? 1 : 0,
+                st.oneHitKill ? 1 : 0,
                 st.infStamina ? 1 : 0,
                 st.infSpirit ? 1 : 0,
                 st.dmgOutMult,
@@ -247,6 +251,7 @@ namespace trinity
         const State def;
         State&      st = State::Get();
         st.godMode       = def.godMode;
+        st.oneHitKill    = def.oneHitKill;
         st.infStamina    = def.infStamina;
         st.infSpirit     = def.infSpirit;
         st.dmgOutMult    = def.dmgOutMult;

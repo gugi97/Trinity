@@ -102,8 +102,11 @@ namespace trinity::gui
                         game::Friendly::Ready()
                             ? "Gifting NPCs or feeding animals builds trust faster."
                             : "Gifting NPCs or feeding animals builds trust faster. Unavailable right now.");
+        changed |= ui::Toggle("One-Hit Kill", &st.oneHitKill,
+                        "Anything you hit dies. Overrides the Outgoing Damage slider.");
         changed |= ui::FloatOption("Outgoing Damage", &st.dmgOutMult, 0.0f, 20.0f, 0.25f, 1.0f, "%.2fx",
-                        "Adjusts how much damage you deal.");
+                        st.oneHitKill ? "Adjusts how much damage you deal. One-Hit Kill is on, so this is ignored."
+                                      : "Adjusts how much damage you deal.");
         changed |= ui::FloatOption("Incoming Damage", &st.dmgInMult, 0.0f, 10.0f, 0.25f, 1.0f, "%.2fx",
                         "Adjusts how much damage you take.");
 
@@ -420,6 +423,46 @@ namespace trinity::gui
             ui::Option("Waiting for your equipment...", "Load into the world first.");
             ui::End();
             return;
+        }
+
+        // Whole-loadout actions first: they are the reason most people open this
+        // page, and doing them piece by piece is the tedious part.
+        {
+            static char s_eqBatchMsg[128] = "";
+            const bool durable = game::Equipment::EditsPersist();
+
+            if (ui::Option("Max Refine All (+10)",
+                           durable ? "Refines every worn piece to +10."
+                                   : "Refines every worn piece to +10. Server copy not "
+                                     "resolved yet, so this may not survive a reload."))
+            {
+                bool all = false;
+                const int k = game::Equipment::RefineAllMax(&all);
+                snprintf(s_eqBatchMsg, sizeof(s_eqBatchMsg),
+                         k == 0 ? "Nothing to refine."
+                                : (all ? "Refined %d piece(s) to +10."
+                                       : "Refined %d piece(s) to +10 - some are this session only."),
+                         k);
+            }
+
+            if (ui::Option("Unlock All Sockets",
+                           "Opens all five sockets on every worn piece."))
+            {
+                const int k = game::Equipment::UnlockAllSockets();
+                snprintf(s_eqBatchMsg, sizeof(s_eqBatchMsg),
+                         k == 0 ? "Nothing to unlock." : "Opened the sockets on %d piece(s).", k);
+            }
+
+            if (ui::Option("Remove All Abyss Gear",
+                           "Empties every socket on every worn piece. The sockets stay open."))
+            {
+                bool all = false;
+                const int k = game::Equipment::ClearAllGears(&all);
+                snprintf(s_eqBatchMsg, sizeof(s_eqBatchMsg),
+                         k == 0 ? "Nothing to remove." : "Emptied the sockets on %d piece(s).", k);
+            }
+
+            if (s_eqBatchMsg[0]) ui::Option(s_eqBatchMsg);
         }
 
         const int n = game::Equipment::SlotCount();

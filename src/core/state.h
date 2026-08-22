@@ -46,6 +46,11 @@ namespace trinity
 
         // Battle-damage multipliers (player.cpp). Applied to the signed HP
         // delta at the damage-apply dispatcher; 1.0 = game behavior.
+        // One-Hit Kill rides the same outgoing path as dmgOutMult rather than
+        // being a separate mechanism: it just overrides the multiplier with one
+        // large enough that any survivable hit is not. Kept as its own flag so
+        // the slider is not silently rewritten behind the player's back.
+        bool  oneHitKill = false;
         float dmgOutMult = 1.0f; // player -> enemy
         float dmgInMult  = 1.0f; // enemy  -> player
 

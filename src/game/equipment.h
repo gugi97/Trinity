@@ -106,6 +106,18 @@ namespace trinity::game
         // sockets open). Durable, both realms.
         static bool ClearAll(uint16_t tag);
 
+        // --- Whole-loadout actions -------------------------------------------
+        // Each is the per-piece edit above applied across everything worn, in
+        // one press instead of one piece at a time. They reuse those functions
+        // verbatim, so durability and realm behaviour are identical - only the
+        // looping is new. Each returns how many pieces it actually changed, and
+        // `persistedAll` (optional) reports whether every write also reached the
+        // server realm; a false there means some of it is session-only, which
+        // the caller should say rather than imply a clean success.
+        static int RefineAllMax(bool* persistedAll = nullptr);
+        static int UnlockAllSockets();
+        static int ClearAllGears(bool* persistedAll = nullptr);
+
         // Game-thread upkeep: after a socket edit, re-aggregates the equipped
         // items' effects (the same pass BatchEquip runs on a gear change) so a
         // newly socketed gear takes effect live instead of only after a reload.

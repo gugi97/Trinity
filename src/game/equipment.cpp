@@ -477,6 +477,73 @@ namespace trinity::game
     // effects on the client component so the change takes hold now instead of
     // waiting for a reload. This is the same pair BatchEquip runs on a gear
     // change; POD locals only, guarded, because it calls into engine code.
+    // --- Whole-loadout actions -----------------------------------------------
+    // Deliberately thin: snapshot the worn pieces, then call the same per-piece
+    // edit the menu already calls. Nothing here touches memory directly, so a
+    // batch cannot behave differently from doing it by hand - it just saves the
+    // hand.
+    namespace
+    {
+        // Copy the tags out before editing. SlotCount() rebuilds the snapshot,
+        // and an edit can invalidate it, so iterating it while writing would be
+        // reading a table out from under ourselves.
+        int CollectTags(uint16_t* tags, int cap)
+        {
+            const int n = Equipment::SlotCount();
+            int count = 0;
+            for (int i = 0; i < n && count < cap; ++i)
+            {
+                Equipment::SlotInfo si{};
+                if (Equipment::GetSlot(i, &si)) tags[count++] = si.tag;
+            }
+            return count;
+        }
+        constexpr int kMaxWorn = 32;
+    }
+
+    int Equipment::RefineAllMax(bool* persistedAll)
+    {
+        if (persistedAll) *persistedAll = true;
+        uint16_t tags[kMaxWorn];
+        const int n = CollectTags(tags, kMaxWorn);
+        int changed = 0;
+        for (int i = 0; i < n; ++i)
+        {
+            bool durable = false;
+            if (SetRefine(tags[i], kRefineMax, &durable)) ++changed;
+            if (!durable && persistedAll) *persistedAll = false;
+        }
+        LOG("equipment: refined %d/%d worn piece(s) to +%d.", changed, n, kRefineMax);
+        return changed;
+    }
+
+    int Equipment::UnlockAllSockets()
+    {
+        uint16_t tags[kMaxWorn];
+        const int n = CollectTags(tags, kMaxWorn);
+        int changed = 0;
+        for (int i = 0; i < n; ++i)
+            if (UnlockAll(tags[i])) ++changed;
+        LOG("equipment: opened every socket on %d/%d worn piece(s).", changed, n);
+        return changed;
+    }
+
+    int Equipment::ClearAllGears(bool* persistedAll)
+    {
+        if (persistedAll) *persistedAll = true;
+        uint16_t tags[kMaxWorn];
+        const int n = CollectTags(tags, kMaxWorn);
+        int changed = 0;
+        for (int i = 0; i < n; ++i)
+        {
+            // ClearAll empties one piece; a false here means that piece had
+            // nothing to clear, which is not a failure worth reporting.
+            if (ClearAll(tags[i])) ++changed;
+        }
+        LOG("equipment: emptied the sockets on %d/%d worn piece(s).", changed, n);
+        return changed;
+    }
+
     void Equipment::Tick()
     {
         if (!g_dirty.exchange(false, std::memory_order_acq_rel)) return;

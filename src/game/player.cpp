@@ -398,6 +398,11 @@ namespace trinity::game
         // damage, otherwise if the attacker actor behind sourceCtx is any tracked
         // player's actor it is outgoing. Anything else (NPC vs NPC, scripted
         // drains with no source) passes through untouched.
+        // Large enough that anything with a health bar dies to one hit, small
+        // enough that delta * mult stays far inside int64 and cannot wrap into
+        // a positive (i.e. a heal).
+        constexpr float kOneHitMult = 1000.0f;
+
         int64_t ScaleDamage(uintptr_t targetOwner, uintptr_t sourceCtx, int64_t delta)
         {
             const State& st = State::Get();
@@ -413,7 +418,9 @@ namespace trinity::game
                 if (!Read64(sourceCtx + kOff_Owner_Actor, &actor) ||
                     !InSet(g_actors, kMaxPlayers, static_cast<uintptr_t>(actor)))
                     return delta;
-                mult = st.dmgOutMult;
+                // One-Hit Kill wins over the slider when both are set - it is
+                // the more explicit request of the two.
+                mult = st.oneHitKill ? kOneHitMult : st.dmgOutMult;
             }
             if (mult == 1.0f) return delta;
 

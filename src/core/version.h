@@ -4,7 +4,7 @@
 // Keep the numeric components in sync with the string below; the Windows
 // VERSIONINFO resource (Trinity.rc) builds FILEVERSION/PRODUCTVERSION from them.
 #define TRINITY_VERSION_MAJOR 0
-#define TRINITY_VERSION_MINOR 16
-#define TRINITY_VERSION_PATCH 1
+#define TRINITY_VERSION_MINOR 17
+#define TRINITY_VERSION_PATCH 0
 
-#define TRINITY_VERSION "0.16.1"
+#define TRINITY_VERSION "0.17.0"
