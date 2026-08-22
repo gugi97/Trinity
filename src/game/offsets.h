@@ -1112,6 +1112,19 @@ namespace trinity::game
     // reach, fully restored on disable. If it changes nothing it costs nothing.
     inline constexpr uintptr_t kOff_WantedDef_IsBlocked     = 0x10; // u8
     inline constexpr uint32_t  kWantedRows_Max = 4096; // sanity bound; the live table is ~35
+
+    // Zeroing the price left the crime registering: poster and region marker
+    // still appeared, and _isBlocked on the WantedInfo row turned out not to be
+    // the gate either. What decides that hitting a faction's people IS a crime
+    // is one byte on the TRIBE: TribeInfo::_wantedCrimeType.
+    //
+    // Offset read the same way as _increasePrice - from the deserialiser's own
+    // parse-failure message, whose read is `lea rdx,[rdi+0x50]` with size 1.
+    // Setting it to 0 removes the crime type, so there is nothing to register
+    // rather than something registered as worthless.
+    inline constexpr const char* kStr_TribeInfoTable = "tribeinfo";
+    inline constexpr uintptr_t kOff_TribeDef_WantedCrimeType = 0x50; // u8
+    inline constexpr uint32_t  kTribeRows_Max = 8192;
     inline constexpr uintptr_t kOff_StrDef_Buffer  = 0x18; // ptr -> string obj
     inline constexpr uintptr_t kOff_ItemDef_Icons  = 0x90; // _itemIconList (vector)
     inline constexpr uintptr_t kOff_IconData_Path  = 0x00; // u16 -> stringinfo row

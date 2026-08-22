@@ -1824,10 +1824,65 @@ namespace trinity::game
                     ++changed;
             }
         }
-        LOG("world: No Bounty %s on %d/%u wanted row(s) - the bounty PRICE is zero; "
-            "the wanted state itself is held elsewhere and still triggers.",
-            enable ? "applied" : "reverted", changed, count);
-        return changed > 0;
+        // Zeroing the price alone left the crime registering, so also clear the
+        // crime TYPE each faction assigns. With no type there is nothing to
+        // register, rather than something registered as worthless.
+        static uintptr_t s_tribeGlobal = 0;
+        static bool      s_tribeLooked = false;
+        if (!s_tribeLooked)
+        {
+            s_tribeLooked = true;
+            s_tribeGlobal = FindTableGlobal(kStr_TribeInfoTable);
+            LOG(s_tribeGlobal ? "world: TribeInfo table @ %p."
+                              : "world: TribeInfo table not found - crime type left alone.",
+                reinterpret_cast<void*>(s_tribeGlobal));
+        }
+
+        int tribes = 0;
+        if (s_tribeGlobal)
+        {
+            uintptr_t ttab = 0;
+            uint32_t  tcount = 0;
+            if (ReadPtr(s_tribeGlobal, &ttab) &&
+                Read32(ttab + kOff_ItemTable_Count, &tcount) &&
+                tcount > 0 && tcount <= kTribeRows_Max)
+            {
+                static std::vector<uint8_t> s_origCrime;
+                static std::vector<char>    s_tribeCaptured;
+                if (s_tribeCaptured.size() != tcount)
+                {
+                    s_origCrime.assign(tcount, 0);
+                    s_tribeCaptured.assign(tcount, 0);
+                }
+                for (uint32_t row = 0; row < tcount; ++row)
+                {
+                    uintptr_t def = 0;
+                    if (!DefForRow(s_tribeGlobal, static_cast<uint16_t>(row), &def)) continue;
+                    if (enable)
+                    {
+                        if (!s_tribeCaptured[row])
+                        {
+                            uint8_t orig = 0;
+                            if (!Read8(def + kOff_TribeDef_WantedCrimeType, &orig)) continue;
+                            s_origCrime[row] = orig;
+                            s_tribeCaptured[row] = 1;
+                        }
+                        if (s_origCrime[row] != 0 &&
+                            Write8(def + kOff_TribeDef_WantedCrimeType, 0))
+                            ++tribes;
+                    }
+                    else if (s_tribeCaptured[row])
+                    {
+                        if (Write8(def + kOff_TribeDef_WantedCrimeType, s_origCrime[row]))
+                            ++tribes;
+                    }
+                }
+            }
+        }
+
+        LOG("world: No Bounty %s - price zeroed on %d/%u wanted row(s), crime type cleared "
+            "on %d tribe(s).", enable ? "applied" : "reverted", changed, count, tribes);
+        return changed > 0 || tribes > 0;
     }
 
     bool Inventory::SetAllMaxStackSizes(bool enable, int64_t value)
