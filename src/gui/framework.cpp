@@ -255,6 +255,14 @@ namespace trinity::ui
     void RebuildFonts()
     {
         ImGuiIO& io = ImGui::GetIO();
+
+        // NewFrame() marks the atlas Locked and never unmarks it. ImFontAtlas
+        // guards Clear() with an assert against exactly that - which a Release
+        // build compiles away, so instead of a diagnostic the clear went ahead
+        // and destroyed fonts the context still pointed at. Unlock deliberately;
+        // the next NewFrame sets it again.
+        io.Fonts->Locked = false;
+
         // Clear() frees every ImFont, so the cached pointers must not outlive it.
         io.Fonts->Clear();
         g_fontBody = g_fontBold = g_fontTitle = nullptr;

@@ -409,6 +409,29 @@ namespace trinity::hooks
     }
 
     // Rebuild the RTV heap and per-frame command allocators for a new back-buffer
+    // Rebuild the font atlas for a language change, guarded.
+    //
+    // Kept in its own function because __try cannot live in a frame that needs
+    // C++ unwinding, and guarded at all because this path tears down and
+    // recreates GPU resources: if it ever faults again, the sane outcome is
+    // losing live language switching, not losing the overlay. Returns false
+    // once, and the caller then stops asking.
+    static bool RebuildFontAtlasGuarded()
+    {
+        __try
+        {
+            WaitForOverlayIdle();
+            ImGui_ImplDX12_InvalidateDeviceObjects();
+            ui::RebuildFonts();
+            ImGui_ImplDX12_CreateDeviceObjects();
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
+    }
+
     // count. The caller must have flushed our overlay work first (WaitForOverlayIdle)
     // and must call CreateRenderTargets afterwards to repopulate the views.
     static bool ResizeFrameResources(UINT newCount)
@@ -771,11 +794,22 @@ namespace trinity::hooks
         // which is only safe between frames - here, before NewFrame, on the
         // render thread. Doing it from the menu (render thread too, but mid
         // frame) would destroy resources the current frame still references.
-        if (ui::ConsumeFontRebuildRequest())
+        // Frames already submitted still reference the font texture, so it
+        // cannot be released until the GPU has finished with them. This file
+        // already had WaitForOverlayIdle() for exactly that, used before every
+        // other resource teardown - the first version of this rebuild simply
+        // failed to call it and freed a texture out from under work in flight.
+        // That is the access violation seen in the field, and it landed seconds
+        // late precisely because it was the GPU tripping over it, not this thread.
+        static bool s_rebuildAllowed = true;
+        if (s_rebuildAllowed && ui::ConsumeFontRebuildRequest())
         {
-            ImGui_ImplDX12_InvalidateDeviceObjects();
-            ui::RebuildFonts();
-            ImGui_ImplDX12_CreateDeviceObjects();
+            if (!RebuildFontAtlasGuarded())
+            {
+                s_rebuildAllowed = false;
+                LOG_WARN("gui: font rebuild faulted - live language switching is off for "
+                         "this session. Restart to pick up a different alphabet.");
+            }
         }
 
         ImGui_ImplDX12_NewFrame();
