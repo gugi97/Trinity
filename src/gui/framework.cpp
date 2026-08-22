@@ -168,7 +168,20 @@ namespace trinity::ui
         if (i18n::NeedsCjkGlyphs())
         {
             if (cjkMerges > 0)
-                LOG("gui: merged CJK glyphs from %s into %d font(s).", cjkFace, cjkMerges);
+            {
+                // Build now rather than waiting, so the glyph counts below are
+                // the real ones. Reporting "merged" only says a file was
+                // accepted; the count is what proves the glyphs reached the
+                // font that draws the rows. Getting this wrong twice is exactly
+                // what a number here would have caught the first time.
+                io.Fonts->Build();
+                LOG("gui: merged CJK glyphs from %s into %d font(s) - body=%d glyph(s), "
+                    "bold=%d, title=%d.",
+                    cjkFace, cjkMerges,
+                    g_fontBody  ? g_fontBody->Glyphs.Size  : -1,
+                    g_fontBold  ? g_fontBold->Glyphs.Size  : -1,
+                    g_fontTitle ? g_fontTitle->Glyphs.Size : -1);
+            }
             else
                 LOG_WARN("gui: no CJK font found on this system - Chinese text will draw as "
                          "'?'. Installing Microsoft YaHei (msyh.ttc) fixes it.");

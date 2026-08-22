@@ -2214,7 +2214,18 @@ namespace trinity::game
             // client one is what makes it appear WITHOUT a reload: the reconcile
             // syncs quantities but does not create slots.
             const bool okServer = AddIntoHolder(serverH, /*serverRealm=*/true,  typeId, qty, id, def);
-            const bool okClient = AddIntoHolder(clientH, /*serverRealm=*/false, typeId, qty, id, def);
+
+            // Only mirror to the client if the server - the authority - took it.
+            //
+            // Reporting a client-only add as a failure was half the fix; it left
+            // the client copy sitting there. That copy is what the game shows in
+            // the bag and what it then refuses to use, because the authoritative
+            // side has no such item: the "Item not found" on a spawned saddle.
+            // Not writing it in the first place is the other half. A failed add
+            // now leaves nothing behind rather than a convincing-looking ghost.
+            const bool okClient = okServer
+                ? AddIntoHolder(clientH, /*serverRealm=*/false, typeId, qty, id, def)
+                : false;
 
             if (okServer && okClient)
                 return true;
@@ -2233,10 +2244,9 @@ namespace trinity::game
             // cosmetic, the reconcile deletes it, and the user was told it
             // worked. A server-only add is the opposite case and genuinely did
             // work - it is real in the save and shows after a reload.
-            if (okClient && !okServer)
-                LOG_WARN("inventory: add item %u reached the CLIENT only - it will look "
-                         "present but cannot be used, and the reconcile will remove it. "
-                         "Reporting this as a failure.", typeId);
+            if (okServer && !okClient)
+                LOG_WARN("inventory: add item %u is in the save but not on screen yet - "
+                         "reload to see it.", typeId);
             return okServer;
         }
 
