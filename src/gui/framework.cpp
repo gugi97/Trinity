@@ -121,30 +121,20 @@ namespace trinity::ui
         static const char* kTitle[] = { "segoeuib.ttf", "arialbd.ttf", "tahomabd.ttf",
                                         "DejaVuSans-Bold.ttf", nullptr };
 
-        g_fontBody  = tryFont(kBody,  21.0f * g_scale);
-        g_fontBold  = tryFont(kBold,  21.0f * g_scale);
-        g_fontTitle = tryFont(kTitle, 30.0f * g_scale);
-
-        // Chinese (and any other CJK language) needs both a face that HAS the
-        // glyphs and an explicit range - the Latin faces above carry neither, so
-        // without this the menu would draw empty boxes rather than text.
-        //
-        // Merged into the body font instead of replacing it: Latin text keeps
-        // the intended typeface and only the CJK characters come from the CJK
-        // face. The ~2500-glyph "common" range is loaded rather than the full
-        // set, because the full one costs a far larger atlas for characters a
-        // mod menu never shows.
-        //
-        // This is decided once, here, from the SAVED language: the atlas is
-        // built before any menu exists, so switching language in-game needs a
-        // restart before new glyphs appear. The picker says so.
-        if (i18n::NeedsCjkGlyphs() && g_fontBody)
+        // Merge CJK coverage into the font that was added LAST. That is how
+        // ImFontConfig::MergeMode works - it has no way to name a target - so
+        // this must be called immediately after the font it is meant to extend.
+        // Getting that order wrong is not a visible error: the glyphs simply
+        // land in the wrong font and the right one renders '?'.
+        int  cjkMerges = 0;
+        const char* cjkFace = nullptr;
+        auto mergeCjk = [&](float size)
         {
+            if (!i18n::NeedsCjkGlyphs()) return;
             static const char* kCjk[] = { "msyh.ttc", "msyh.ttf", "simsun.ttc",
                                           "meiryo.ttc", "malgun.ttf", nullptr };
             char path[MAX_PATH];
-            bool merged = false;
-            for (const char* const* n = kCjk; *n && !merged; ++n)
+            for (const char* const* n = kCjk; *n; ++n)
             {
                 snprintf(path, sizeof(path), "%s\\Fonts\\%s", windir, *n);
                 const DWORD attr = GetFileAttributesA(path);
@@ -152,22 +142,38 @@ namespace trinity::ui
                     continue;
 
                 ImFontConfig cfg;
-                cfg.MergeMode        = true;   // add to g_fontBody, do not replace it
-                cfg.PixelSnapH       = true;
-                cfg.OversampleH      = 1;
-                cfg.OversampleV      = 1;
+                cfg.MergeMode   = true;   // extend the previous font, do not replace it
+                cfg.PixelSnapH  = true;
+                cfg.OversampleH = 1;
+                cfg.OversampleV = 1;
                 if (io.Fonts->AddFontFromFileTTF(
-                        path, 21.0f * g_scale, &cfg,
-                        io.Fonts->GetGlyphRangesChineseSimplifiedCommon()))
+                        path, size, &cfg, io.Fonts->GetGlyphRangesChineseSimplifiedCommon()))
                 {
-                    LOG("gui: merged CJK glyphs from %s.", *n);
-                    merged = true;
+                    ++cjkMerges;
+                    cjkFace = *n;
                 }
+                return;                   // first usable face wins
             }
-            if (!merged)
-                LOG_WARN("gui: no CJK font found on this system - Chinese text will "
-                         "draw as blank boxes. Installing Microsoft YaHei (msyh.ttc) fixes it.");
+        };
+
+        // Body carries every row label and description, bold carries the tab
+        // strip - both show translated text, so both need the glyphs. Title is
+        // skipped on purpose: it only ever draws the literal "TRINITY".
+        g_fontBody  = tryFont(kBody,  21.0f * g_scale);
+        mergeCjk(21.0f * g_scale);
+        g_fontBold  = tryFont(kBold,  21.0f * g_scale);
+        mergeCjk(21.0f * g_scale);
+        g_fontTitle = tryFont(kTitle, 30.0f * g_scale);
+
+        if (i18n::NeedsCjkGlyphs())
+        {
+            if (cjkMerges > 0)
+                LOG("gui: merged CJK glyphs from %s into %d font(s).", cjkFace, cjkMerges);
+            else
+                LOG_WARN("gui: no CJK font found on this system - Chinese text will draw as "
+                         "'?'. Installing Microsoft YaHei (msyh.ttc) fixes it.");
         }
+
 
         if (!g_fontBody)
         {
