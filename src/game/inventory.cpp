@@ -538,26 +538,57 @@ namespace trinity::game
                 reinterpret_cast<void*>(holder), reinterpret_cast<void*>(container),
                 moneyType);
 
-            // A balance is a positive number large enough to be money and small
-            // enough not to be a pointer or a timestamp.
-            auto plausible = [](uint64_t v) { return v >= 100ull && v <= 2000000000ull; };
-
-            for (int which = 0; which < 2; ++which)
+            // The first pass dumped pointer halves as "candidates" - 0x23B kept
+            // appearing because it is the top half of a heap address, not a
+            // balance. Reject anything that is part of a pointer, and read the
+            // 64-bit value too, since a currency total has no reason to be 32.
+            auto looksLikePointer = [&](uintptr_t at) -> bool
             {
-                const uintptr_t base = which ? container : holder;
-                const char* what = which ? "container" : "holder";
+                uintptr_t p = 0;
+                return ReadPtr(at, &p) && p >= kMinPointer;
+            };
+            auto plausible = [](uint64_t v) { return v >= 10ull && v <= 2000000000ull; };
+
+            for (int which = 0; which < 3; ++which)
+            {
+                uintptr_t base = 0;
+                const char* what = "";
+                switch (which)
+                {
+                case 0: base = holder;    what = "holder";    break;
+                case 1: base = container; what = "container"; break;
+                default:
+                    // The Money bucket itself - the storage the balance belongs to.
+                    ReadPtr(holder + kOff_InvHolder_Buckets, &base);
+                    what = "bucket[0]";
+                    if (base >= kMinPointer) ReadPtr(base, &base);
+                    break;
+                }
                 if (base < kMinPointer) continue;
 
-                char line[512];
-                int w = snprintf(line, sizeof(line), "money/probe: %s candidates:", what);
+                char line[900];
+                int w = snprintf(line, sizeof(line), "money/probe: %s:", what);
                 int found = 0;
-                for (uintptr_t off = 0; off <= 0x300 && found < 20; off += 4)
+                for (uintptr_t off = 0; off <= 0x600 && found < 26; off += 8)
                 {
-                    uint32_t v32 = 0;
-                    if (!Read32(base + off, &v32)) break;
-                    if (plausible(v32) && w < static_cast<int>(sizeof(line)) - 32)
+                    // Skip the qword if it is itself a pointer, and skip a dword
+                    // that is merely half of one.
+                    if (looksLikePointer(base + off)) continue;
+
+                    uint64_t v64 = 0;
+                    if (!Read64(base + off, &v64)) break;
+                    if (plausible(v64) && w < static_cast<int>(sizeof(line)) - 40)
                     {
-                        w += snprintf(line + w, sizeof(line) - w, " +%03X=%u", (unsigned)off, v32);
+                        w += snprintf(line + w, sizeof(line) - w, " +%03X=%llu",
+                                      (unsigned)off, (unsigned long long)v64);
+                        ++found;
+                        continue;
+                    }
+                    uint32_t lo = static_cast<uint32_t>(v64);
+                    uint32_t hi = static_cast<uint32_t>(v64 >> 32);
+                    if (hi == 0 && plausible(lo) && w < static_cast<int>(sizeof(line)) - 40)
+                    {
+                        w += snprintf(line + w, sizeof(line) - w, " +%03X=%u", (unsigned)off, lo);
                         ++found;
                     }
                 }

@@ -495,27 +495,31 @@ namespace trinity::game
                 if (st.noFallDamage)
                 {
                     uint64_t src = 0;
-                    const bool hasAttacker =
+                    const bool srcReadable =
                         sourceCtx >= kMinPointer &&
-                        Read64(sourceCtx + kOff_Owner_Actor, &src) &&
-                        src >= kMinPointer;
-                    if (!hasAttacker)
+                        Read64(sourceCtx + kOff_Owner_Actor, &src);
+                    const bool hasAttacker = srcReadable && src >= kMinPointer;
+
+                    // Report EVERY hit the player takes while this is on, not
+                    // just the ones blocked. The first attempt blocked only
+                    // "damage with no attacker" and nothing was ever logged,
+                    // which means falls are not arriving the way that assumed -
+                    // and no amount of reasoning from here settles which way
+                    // they DO arrive. So describe each hit and let a real fall
+                    // say what it looks like.
+                    static int s_seen = 0;
+                    if (s_seen < 10)
                     {
-                        // Report the first few, so what is actually being blocked
-                        // can be read off a real game rather than assumed. If
-                        // anything other than falls shows up here, the feature's
-                        // name is wrong and should change - not the other way round.
-                        static int s_blocked = 0;
-                        if (s_blocked < 5)
-                        {
-                            ++s_blocked;
-                            LOG("player: blocked sourceless damage %lld (status=%u, src=%p) "
-                                "- No Fall Damage is on.",
-                                static_cast<long long>(delta), statusId,
-                                reinterpret_cast<void*>(sourceCtx));
-                        }
-                        return 0;
+                        ++s_seen;
+                        LOG("player/damage: delta=%lld status=%u src=%p readable=%d "
+                            "actor=%llX attacker=%d",
+                            static_cast<long long>(delta), statusId,
+                            reinterpret_cast<void*>(sourceCtx), srcReadable ? 1 : 0,
+                            static_cast<unsigned long long>(src), hasAttacker ? 1 : 0);
                     }
+
+                    if (!hasAttacker)
+                        return 0;
                 }
                 mult = st.dmgInMult;
             }

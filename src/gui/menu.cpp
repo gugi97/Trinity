@@ -683,8 +683,8 @@ namespace trinity::gui
         // press applies it (see ui::IntAction).
         static int s_advHours = 1;
         if (ui::Toggle("No Bounty", &st.noBounty,
-                       "Crimes stop adding to your bounty. Applies while the game is running; "
-                       "it changes no save data."))
+                       "Crimes stop adding to your bounty. Faction contribution is a separate "
+                       "system and is not affected. Session only; changes no save data."))
         {
             game::Inventory::SetNoBounty(st.noBounty);
             changed = true;
