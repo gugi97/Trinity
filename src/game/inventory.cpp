@@ -1701,11 +1701,19 @@ namespace trinity::game
         const int64_t targets[] = { shown, shown * 100, shown * 1000 };
         const double  approx    = static_cast<double>(shown);
 
+        // The balance was not in the inventory objects at exact scale, so widen
+        // the net: include the character each holder hangs off, since a wallet
+        // is more plausibly character state than inventory state.
+        uintptr_t clientChar = ClientCharacterAddr();
+        uintptr_t serverChar = ServerCharacterAddr();
+
         struct Region { const char* name; uintptr_t base; };
         const Region regions[] = {
-            { "holder",    holder    },
-            { "container", container },
-            { "server",    server    },
+            { "holder",     holder     },
+            { "container",  container  },
+            { "server",     server     },
+            { "clientChar", clientChar },
+            { "serverChar", serverChar },
         };
 
         int hits = 0;
@@ -1746,10 +1754,33 @@ namespace trinity::game
                 {
                     LOG("money/find: %s+%04X = %.2f (float)", r.name, (unsigned)off, f);
                     ++hits;
+                    continue;
                 }
-                else if (d > approx * 0.999 && d < approx * 1.001)
+                if (d > approx * 0.999 && d < approx * 1.001)
                 {
                     LOG("money/find: %s+%04X = %.2f (double)", r.name, (unsigned)off, d);
+                    ++hits;
+                    continue;
+                }
+
+                // Near miss. If the stored figure is scaled by something other
+                // than a clean 100 - or rounded - an exact band still misses it,
+                // and reporting nothing teaches us nothing. Anything within half
+                // a percent of the entered amount, or of it times 100, is worth
+                // seeing.
+                // `near` is a legacy Windows macro, so this cannot be called that.
+                auto closeTo = [](int64_t v, double target)
+                {
+                    return v > 0 && static_cast<double>(v) > target * 0.995 &&
+                           static_cast<double>(v) < target * 1.005;
+                };
+                const int64_t a = static_cast<int64_t>(v64);
+                const int64_t b = static_cast<int64_t>(v32);
+                if (near(a, approx) || near(b, approx) ||
+                    near(a, approx * 100.0) || near(b, approx * 100.0))
+                {
+                    LOG("money/find: %s+%04X ~ %lld (near miss)", r.name, (unsigned)off,
+                        static_cast<long long>(closeTo(a, approx) || closeTo(a, approx * 100.0) ? a : b));
                     ++hits;
                 }
             }
