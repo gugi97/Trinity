@@ -278,7 +278,11 @@ namespace trinity::game
         // (which gate on these same flags first) simply never look at the sets.
         bool AnyStatFeatureActive(const State& st)
         {
-            return st.godMode || st.infStamina || st.infSpirit ||
+            // noFallDamage belongs here too: without the walk the tracked-player
+            // set is empty, ScaleDamage never recognises the victim, and the
+            // toggle would silently do nothing.
+            return st.godMode || st.infStamina || st.infSpirit || st.noFallDamage ||
+                   st.oneHitKill ||
                    st.dmgInMult != 1.0f || st.dmgOutMult != 1.0f;
         }
 
@@ -476,13 +480,43 @@ namespace trinity::game
         // a positive (i.e. a heal).
         constexpr float kOneHitMult = 1000.0f;
 
-        int64_t ScaleDamage(uintptr_t targetOwner, uintptr_t sourceCtx, int64_t delta)
+        int64_t ScaleDamage(uintptr_t targetOwner, uintptr_t sourceCtx, int64_t delta,
+                            uint16_t statusId)
         {
             const State& st = State::Get();
 
             float mult = 1.0f;
             if (InSet(g_targetOwners, kMaxPlayers, targetOwner))
             {
+                // A fall has nobody behind it. Every ordinary hit - weapon, arrow,
+                // claw - arrives with a source actor, so "no attacker" is the
+                // discriminator this dispatcher actually offers; the comment above
+                // already calls that category out.
+                if (st.noFallDamage)
+                {
+                    uint64_t src = 0;
+                    const bool hasAttacker =
+                        sourceCtx >= kMinPointer &&
+                        Read64(sourceCtx + kOff_Owner_Actor, &src) &&
+                        src >= kMinPointer;
+                    if (!hasAttacker)
+                    {
+                        // Report the first few, so what is actually being blocked
+                        // can be read off a real game rather than assumed. If
+                        // anything other than falls shows up here, the feature's
+                        // name is wrong and should change - not the other way round.
+                        static int s_blocked = 0;
+                        if (s_blocked < 5)
+                        {
+                            ++s_blocked;
+                            LOG("player: blocked sourceless damage %lld (status=%u, src=%p) "
+                                "- No Fall Damage is on.",
+                                static_cast<long long>(delta), statusId,
+                                reinterpret_cast<void*>(sourceCtx));
+                        }
+                        return 0;
+                    }
+                }
                 mult = st.dmgInMult;
             }
             else
@@ -513,7 +547,8 @@ namespace trinity::game
             // Only HP loss is damage; heals, regen and every other status ride
             // this dispatcher too and must pass through unchanged.
             if (delta < 0 && statusId == StatType_Health)
-                delta = ScaleDamage(reinterpret_cast<uintptr_t>(targetOwner), sourceCtx, delta);
+                delta = ScaleDamage(reinterpret_cast<uintptr_t>(targetOwner), sourceCtx, delta,
+                                    statusId);
 
             return oDamageApply(targetOwner, statusId, time, delta, sourceCtx,
                                 a6, a7, a8, a9, a10, out);

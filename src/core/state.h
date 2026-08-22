@@ -58,6 +58,9 @@ namespace trinity
         int   themeIndex = 0;
 
         bool  oneHitKill = false;
+        // Blocks HP loss that arrives with no attacker behind it - which is what
+        // a fall is. See ScaleDamage for why that is the available discriminator.
+        bool  noFallDamage = false;
         float dmgOutMult = 1.0f; // player -> enemy
         float dmgInMult  = 1.0f; // enemy  -> player
 

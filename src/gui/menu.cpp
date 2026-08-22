@@ -103,6 +103,8 @@ namespace trinity::gui
                         game::Friendly::Ready()
                             ? "Gifting NPCs or feeding animals builds trust faster."
                             : "Gifting NPCs or feeding animals builds trust faster. Unavailable right now.");
+        changed |= ui::Toggle("No Fall Damage", &st.noFallDamage,
+                        "Stops damage that arrives with no attacker behind it, which is what a fall is.");
         changed |= ui::Toggle("One-Hit Kill", &st.oneHitKill,
                         "Anything you hit dies. Overrides the Outgoing Damage slider.");
         changed |= ui::FloatOption("Outgoing Damage", &st.dmgOutMult, 0.0f, 20.0f, 0.25f, 1.0f, "%.2fx",
