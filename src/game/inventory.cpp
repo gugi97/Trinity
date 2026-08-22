@@ -1718,13 +1718,21 @@ namespace trinity::game
                 if (!Read64(r.base + off, &v64)) break;
                 const uint32_t v32 = static_cast<uint32_t>(v64);
 
+                // The HUD shows two decimals and they are lost when the figure
+                // is typed in, so an exact match on shown*100 misses by however
+                // many hundredths were dropped - 41187 became 4118700 while the
+                // real total was 4118727. Match a band instead of a point.
                 for (int t = 0; t < 3; ++t)
                 {
-                    const int64_t want = targets[t];
-                    if (static_cast<int64_t>(v64) == want || static_cast<int64_t>(v32) == want)
+                    const int64_t lo = targets[t];
+                    const int64_t hi = lo + (t == 0 ? 0 : (t == 1 ? 99 : 999));
+                    const int64_t a = static_cast<int64_t>(v64);
+                    const int64_t b = static_cast<int64_t>(v32);
+                    if ((a >= lo && a <= hi) || (b >= lo && b <= hi))
                     {
-                        LOG("money/find: %s+%04X = %lld  (x%d)", r.name, (unsigned)off,
-                            static_cast<long long>(want), t == 0 ? 1 : (t == 1 ? 100 : 1000));
+                        LOG("money/find: %s+%04X = %lld  (x%d band)", r.name, (unsigned)off,
+                            static_cast<long long>((a >= lo && a <= hi) ? a : b),
+                            t == 0 ? 1 : (t == 1 ? 100 : 1000));
                         ++hits;
                         break;
                     }
@@ -1804,22 +1812,20 @@ namespace trinity::game
                     s_captured[row] = 1;
                 }
                 if (Write64(def + kOff_WantedDef_IncreasePrice, 0)) ++changed;
-                // Zeroing the price left the crime registering anyway, so also
-                // raise _isBlocked. Stated as an experiment in the log because
-                // that is what it is - the field name suggests it disables the
-                // entry, and nothing read so far proves it.
-                Write8(def + kOff_WantedDef_IsBlocked, 1);
+                // _isBlocked was tried here and did nothing: the poster and the
+                // region marker still appeared with it raised on every row. It
+                // is not the gate, so the write is gone rather than left in as
+                // a hopeful no-op that still touches the game's data.
             }
             else if (s_captured[row])
             {
                 if (Write64(def + kOff_WantedDef_IncreasePrice,
                             static_cast<uint64_t>(s_orig[row])))
                     ++changed;
-                Write8(def + kOff_WantedDef_IsBlocked, s_origBlocked[row]);
             }
         }
-        LOG("world: No Bounty %s on %d/%u wanted row(s) "
-            "(_increasePrice=0 plus _isBlocked=1, the latter still unproven).",
+        LOG("world: No Bounty %s on %d/%u wanted row(s) - the bounty PRICE is zero; "
+            "the wanted state itself is held elsewhere and still triggers.",
             enable ? "applied" : "reverted", changed, count);
         return changed > 0;
     }

@@ -517,8 +517,11 @@ namespace trinity::game
                         hasAttacker &&
                         InSet(g_actors, kMaxPlayers, static_cast<uintptr_t>(src));
 
+                    // Confirmed in the field: falls report self=1 and are
+                    // blocked, enemy hits report self=0 and pass. Two lines are
+                    // enough to show the test is live without filling the log.
                     static int s_seen = 0;
-                    if (s_seen < 10)
+                    if (s_seen < 2)
                     {
                         ++s_seen;
                         LOG("player/damage: delta=%lld status=%u actor=%llX attacker=%d self=%d%s",
