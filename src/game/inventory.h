@@ -153,6 +153,12 @@ namespace trinity::game
         enum class AddState { Idle, Pending, Added, Failed };
         static AddState AddStatus();
 
+        // Why the last add failed, phrased for the player rather than for the
+        // log - "Storage is full", not an error code. Empty when nothing has
+        // failed yet. The menu shows this instead of pointing at a log file,
+        // which is no help at all mid-game.
+        static const char* LastAddFailure();
+
         // Bulk add: queue `count` items (from `typeIds`), `qtyEach` of each, in
         // one action - "add X of every item in this category". Same engine path
         // as AddItem, just many of them, drained a few per Tick so the adds never

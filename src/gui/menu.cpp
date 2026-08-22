@@ -1204,7 +1204,10 @@ namespace trinity::gui
         }
         else if (now == game::Inventory::AddState::Failed)
         {
-            ui::Toast("Could not add that item - see the log");
+            // Say what actually went wrong. "See the log" is useless advice
+            // while someone is standing in the game with the menu open.
+            const char* why = game::Inventory::LastAddFailure();
+            ui::Toast((why && *why) ? why : "Could not add that item - see the log");
         }
         s_lastAdd = now;
     }

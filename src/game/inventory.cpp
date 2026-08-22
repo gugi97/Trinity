@@ -34,6 +34,17 @@ namespace trinity::game
 
     namespace
     {
+        // Set at each failure site, read by the menu. A plain buffer rather
+        // than a std::string: it is written on the game thread and read on the
+        // render thread, and a fixed buffer that is only ever fully overwritten
+        // cannot be caught mid-reallocation.
+        char g_addFailReason[128] = "";
+
+        void SetAddFailure(const char* why)
+        {
+            snprintf(g_addFailReason, sizeof(g_addFailReason), "%s", why);
+        }
+
         // --- Live handles (set on the game thread by the hook) --------------
         using GetItemQty_t = int64_t(__fastcall*)(void* container, uint16_t typeId, void* keyPtr);
         using GetHolder_t  = void*(__fastcall*)(void* container);
@@ -2080,13 +2091,17 @@ namespace trinity::game
                     LOG_WARN("inventory: add[%s] %u: exception (built=%d planned=%d)",
                              realm, typeId, built ? 1 : 0, planned ? 1 : 0);
                 else if (err != 0)
+                {
                     // Error codes are lookup3 hashes of the engine's error
                     // names; 0xD2023F88 = "eErrNoInventorySlotNotExist" (the
                     // planner's bucket-full/no-slot refusal, both sites).
+                    const bool full = static_cast<uint32_t>(err) == 0xD2023F88u;
                     LOG_WARN("inventory: add[%s] %u: insert planner refused, err=%d%s",
-                             realm, typeId, err,
-                             static_cast<uint32_t>(err) == 0xD2023F88u
-                                 ? " (no slot / bucket full)" : "");
+                             realm, typeId, err, full ? " (no slot / bucket full)" : "");
+                    SetAddFailure(full
+                        ? "That storage is full - free a slot, or raise Slot Size"
+                        : "The game refused the item - see Trinity.log");
+                }
                 else if (nPlaced == 0)
                     LOG_WARN("inventory: add[%s] %u: planner ok but 0 placements",
                              realm, typeId);
@@ -2121,6 +2136,7 @@ namespace trinity::game
                 Read16(def + kOff_ItemDef_BucketType, &want);
                 LOG_WARN("inventory: add[%s] %u: no bucket of type %u in holder",
                          realm, typeId, want);
+                SetAddFailure("Nowhere to put this - your bags have no storage of its kind");
                 return false;
             }
 
@@ -2170,6 +2186,7 @@ namespace trinity::game
             const uintptr_t serverH = ServerHolder();
             if (!ready || !DefForRow(g_itemTableGlobal, typeId, &def) || !clientH || !serverH)
             {
+                SetAddFailure("Not ready yet - load into the world, open your bag once, then retry");
                 LOG_WARN("inventory: add item %u x%lld - not ready (client=%p server=%p def=%p)",
                          typeId, static_cast<long long>(qty),
                          reinterpret_cast<void*>(clientH), reinterpret_cast<void*>(serverH),
@@ -2431,6 +2448,8 @@ namespace trinity::game
         g_addPending.store(true, std::memory_order_release);
         return true;
     }
+
+    const char* Inventory::LastAddFailure() { return g_addFailReason; }
 
     Inventory::AddState Inventory::AddStatus()
     {
