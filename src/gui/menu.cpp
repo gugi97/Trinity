@@ -935,7 +935,22 @@ namespace trinity::gui
     {
         game::Inventory::ItemInfo it{};
         if (!game::Inventory::GetItemInfo(st, cat, idx, &it)) return false;
-        if (filter && filter[0] && !ContainsNoCase(it.name, filter)) return false;
+
+        // Match the engine key and the raw type id as well as the display name.
+        // An item whose definition does not resolve is listed as "Item #1234"
+        // with no key text, so searching for what it is CALLED can never find
+        // it - which is exactly when someone is trying to find it, because that
+        // is the item they cannot use and want gone. Searching its number now
+        // works, and the row shows that number for anything unnamed.
+        if (filter && filter[0])
+        {
+            char idText[16];
+            snprintf(idText, sizeof(idText), "%u", it.typeId);
+            const bool hit = ContainsNoCase(it.name, filter) ||
+                             (it.key && it.key[0] && ContainsNoCase(it.key, filter)) ||
+                             ContainsNoCase(idText, filter);
+            if (!hit) return false;
+        }
         if (out) *out = it;
         return true;
     }
@@ -960,6 +975,13 @@ namespace trinity::gui
         else if (showCat)
             snprintf(desc, sizeof(desc), "%s, in %s.",
                      it.name, game::Inventory::CategoryName(st, cat));
+        else if (strncmp(it.name, "Item #", 6) == 0)
+            // Unnamed means the game has no definition for it - the state a
+            // spawned item ends up in when it never reached the authoritative
+            // side. Say so, and say what to search for to find it again.
+            snprintf(desc, sizeof(desc),
+                     "The game has no definition for this one (id %u) - it cannot be used. "
+                     "Press Del twice to remove it.", it.typeId);
         else
             snprintf(desc, sizeof(desc), "Change how many you have, or remove it.");
 
