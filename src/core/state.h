@@ -64,6 +64,8 @@ namespace trinity
         // Blocks HP loss that arrives with no attacker behind it - which is what
         // a fall is. See ScaleDamage for why that is the available discriminator.
         bool  noFallDamage = false;
+        // Drops the parry timing-margin test; the overlap requirement stays.
+        bool  easyParry = false;
         float dmgOutMult = 1.0f; // player -> enemy
         float dmgInMult  = 1.0f; // enemy  -> player
 

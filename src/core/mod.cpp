@@ -13,6 +13,7 @@
 #include "../game/dye.h"
 #include "../game/equipment.h"
 #include "../game/friendly.h"
+#include "../game/parry.h"
 
 namespace trinity
 {
@@ -55,6 +56,7 @@ namespace trinity
         game::Dye::Install();       // Armor dye / material / repair look
         game::Equipment::Install(); // Abyss-gear socket editor
         game::Friendly::Install();  // Trust Multiplier (gift/feed/tame)
+        game::Parry::Install();     // Easy Parry (locates the site; patches nothing yet)
 
         m_initialized = true;
         LOG_OK("Ready - INSERT (or LB + DOWN on controller) toggles the menu in-game.");
@@ -77,6 +79,7 @@ namespace trinity
         game::World::Remove();
         game::Dye::Remove();
         game::Equipment::Remove();
+        game::Parry::Remove();      // restore the game's own bytes first
         game::Friendly::Remove();
         hooks::RemoveDX12Hooks();
         MH_Uninitialize();

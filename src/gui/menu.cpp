@@ -15,6 +15,7 @@
 #include "../core/settings.h"
 #include "../core/state.h"
 #include "../core/text.h"
+#include "../game/parry.h"
 #include "../game/player.h"
 #include "../game/teleport.h"
 #include "../game/inventory.h"
@@ -104,6 +105,15 @@ namespace trinity::gui
                         game::Friendly::Ready()
                             ? "Gifting NPCs or feeding animals builds trust faster."
                             : "Gifting NPCs or feeding animals builds trust faster. Unavailable right now.");
+        if (ui::Toggle("Easy Parry", &st.easyParry,
+                       game::Parry::Available()
+                           ? "Removes the timing-margin test on a parry. You still have to parry the "
+                             "attack - it just no longer has to be frame-perfect."
+                           : "Removes the timing-margin test on a parry. Unavailable right now."))
+        {
+            game::Parry::SetEnabled(st.easyParry);
+            changed = true;
+        }
         changed |= ui::Toggle("No Fall Damage", &st.noFallDamage,
                         "Stops damage that arrives with no attacker behind it, which is what a fall is.");
         changed |= ui::Toggle("One-Hit Kill", &st.oneHitKill,
