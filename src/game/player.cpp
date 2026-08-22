@@ -146,6 +146,18 @@ namespace trinity::game
             return true;
         }
 
+        // Is this word plausibly a stat entry's type id, or have we walked off
+        // the end of the array? Real ids are small (the live game shows 0..77);
+        // 0xFFFF marks an unused slot WITHIN the array and appears interleaved
+        // with valid ones, so it is not an end marker. Anything else is memory
+        // beyond the array, and accepting it would eventually hand a write a
+        // pointer that is not a stat entry.
+        constexpr int32_t kStatType_Unused = 0xFFFF;
+        bool PlausibleStatType(int32_t t)
+        {
+            return (t >= 0 && t <= 255) || t == kStatType_Unused;
+        }
+
         bool IsHealthType(int32_t t)  { return t == StatType_Health; }
         // Both stamina-typed gauges: 17 (a stamina meter) and 20 (the gauge the
         // sprint gate actually consumes). Pinning both keeps the bar full.
@@ -337,7 +349,8 @@ namespace trinity::game
                 {
                     const uintptr_t e = c.statArray + k * kSizeof_StatEntry;
                     int32_t stt = 0;
-                    if (!StatEntryType(e, &stt)) continue;
+                    if (!StatEntryType(e, &stt)) break;   // unreadable: past the mapping
+                    if (!PlausibleStatType(stt)) break;   // past the end of the array
                     if (IsStaminaType(stt))     { if (nStam < kMaxStatEntries) g_stamEntries[nStam++].store(e, std::memory_order_release); }
                     else if (IsSpiritType(stt)) { if (nSpir < kMaxStatEntries) g_spiritEntries[nSpir++].store(e, std::memory_order_release); }
                 }
@@ -386,7 +399,8 @@ namespace trinity::game
                     {
                         const uintptr_t e = mc.statArray + k * kSizeof_StatEntry;
                         int32_t stt = 0;
-                        if (!StatEntryType(e, &stt)) continue;
+                        if (!StatEntryType(e, &stt)) break;
+                        if (!PlausibleStatType(stt)) break;
                         if (IsStaminaType(stt)) ++stamCount;
                         if (w < static_cast<int>(sizeof(types)) - 8)
                             w += snprintf(types + w, sizeof(types) - w, "%d ", stt);
@@ -398,6 +412,12 @@ namespace trinity::game
                     const int32_t objType = static_cast<int32_t>(objTypeRaw);
 
                     s_seenVt[s_seen++] = vt;
+
+                    // Logged once per distinct class. That is deliberately all
+                    // it does: whether this is a mount or an NPC is settled by
+                    // WHEN the line appears - dismounted versus mounted - not by
+                    // anything readable from the object. ObjectType reads as a
+                    // packed 0x10002 here and cannot decide it.
                     LOG("player/mount-survey: objType=%d vtable=%llX stamina-gauges=%d types=[%s]",
                         objType, static_cast<unsigned long long>(vt), stamCount, types);
                 }
