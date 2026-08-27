@@ -296,6 +296,13 @@ namespace trinity::i18n
                _strnicmp(c, "ko", 2) == 0;
     }
 
+    bool NeedsKoreanGlyphs()
+    {
+        Discover();
+        return g_current > 0 && g_current < static_cast<int>(g_langs.size()) &&
+               _strnicmp(g_langs[g_current].code, "ko", 2) == 0;
+    }
+
     const char* T(const char* english)
     {
         if (!english || !*english || g_table.empty()) return english;

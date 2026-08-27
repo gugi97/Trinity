@@ -97,7 +97,7 @@ set_target_properties(Trinity PROPERTIES
 # code signature these markers materially improve AV/ML reputation scoring; they
 # cost nothing at runtime for a mod of this size.
 if(MSVC)
-    target_compile_options(Trinity PRIVATE /guard:cf)
+    target_compile_options(Trinity PRIVATE /utf-8 /guard:cf)
     target_link_options(Trinity PRIVATE
         /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /guard:cf)
 endif()

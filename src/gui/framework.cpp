@@ -151,8 +151,10 @@ namespace trinity::ui
                 cfg.PixelSnapH  = true;
                 cfg.OversampleH = 1;
                 cfg.OversampleV = 1;
-                if (io.Fonts->AddFontFromFileTTF(
-                        path, size, &cfg, io.Fonts->GetGlyphRangesChineseSimplifiedCommon()))
+                const ImWchar* const glyphs = i18n::NeedsKoreanGlyphs()
+                    ? io.Fonts->GetGlyphRangesKorean()
+                    : io.Fonts->GetGlyphRangesChineseSimplifiedCommon();
+                if (io.Fonts->AddFontFromFileTTF(path, size, &cfg, glyphs))
                 {
                     ++cjkMerges;
                     cjkFace = *n;

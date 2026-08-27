@@ -37,6 +37,9 @@ namespace trinity::i18n
     // startup, so this is read before the fonts load.
     bool NeedsCjkGlyphs();
 
+    // Hangul is not included in ImGui's Chinese glyph range.
+    bool NeedsKoreanGlyphs();
+
     // Translate. Returns `english` unchanged when there is no entry - so an
     // untranslated string is merely untranslated, never blank.
     // The returned pointer stays valid until the next SetLanguage().
