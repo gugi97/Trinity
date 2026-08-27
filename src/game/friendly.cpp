@@ -9,6 +9,7 @@
 #include "offsets.h"
 #include "../mem/safe_memory.h"
 #include "../mem/hooks.h"
+#include "../core/logger.h"
 #include "../core/state.h"
 
 namespace trinity::game
@@ -113,6 +114,8 @@ namespace trinity::game
                 const int64_t s = ScaleGain(oldVal, newVal, mult);
                 if (s != newVal && Write64(r + kOff_FriendlyRec_Value, s))
                 {
+                    LOG("friendly: trust gain key=%u group=%u: %lld -> %lld (mult=%.1fx)",
+                        key, static_cast<unsigned>(group), oldVal, s, mult);
                     g_lastVal[ckLive] = s;
                     return;
                 }
@@ -135,19 +138,14 @@ namespace trinity::game
 
     bool Friendly::Install()
     {
-        // Non-fatal: only Trust Multiplier is lost if a setter doesn't resolve.
-        // Two patterns: this build's, then 1.18.0's. This function's base
-        // offset has already flip-flopped between a constant and a runtime
-        // computation once, and each flip changes the body's LENGTH, so no
-        // single pattern spans both.
-        mem::InstallHookAny("friendly: NPC trust setter",
-                            { kSig_FriendlySetNpc, kSig_FriendlySetNpc_1180 },
-                            "Trust Multiplier (NPCs) disabled",
-                            &hkSetNpc, &oSetNpc, &g_npcTarget);
-        mem::InstallHook("friendly: pet trust setter", kSig_FriendlySetPet,
-                         "Trust Multiplier (pets/mounts) disabled",
-                         &hkSetPet, &oSetPet, &g_petTarget);
-        return true;
+        const bool npc = mem::InstallHookAny("friendly: NPC trust setter",
+                                             { kSig_FriendlySetNpc, kSig_FriendlySetNpc_1180 },
+                                             "NPC gift Trust Multiplier disabled",
+                                             &hkSetNpc, &oSetNpc, &g_npcTarget);
+        const bool pet = mem::InstallHook("friendly: pet trust setter", kSig_FriendlySetPet,
+                                          "pet Trust Multiplier disabled",
+                                          &hkSetPet, &oSetPet, &g_petTarget);
+        return npc || pet;
     }
 
     void Friendly::Remove()

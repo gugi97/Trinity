@@ -67,41 +67,45 @@ namespace trinity
             const char* key = line;
             const char* val = eq + 1;
 
-            if      (!strcmp(key, "openKeyVk"))      vals.openKeyVk     = atoi(val);
-            else if (!strcmp(key, "openPadMask"))    vals.openPadMask   = static_cast<unsigned int>(strtoul(val, nullptr, 0));
-            else if (!strcmp(key, "flyUpKeyVk"))     vals.flyUpKeyVk    = atoi(val);
-            else if (!strcmp(key, "flyDownKeyVk"))   vals.flyDownKeyVk  = atoi(val);
-            else if (!strcmp(key, "flyUpPadMask"))   vals.flyUpPadMask  = static_cast<unsigned int>(strtoul(val, nullptr, 0));
-            else if (!strcmp(key, "flyDownPadMask")) vals.flyDownPadMask = static_cast<unsigned int>(strtoul(val, nullptr, 0));
-            else if (!strcmp(key, "autoSave"))      vals.autoSave      = atoi(val) != 0;
-            else if (!strcmp(key, "godMode"))       vals.godMode       = atoi(val) != 0;
-            else if (!strcmp(key, "oneHitKill"))    vals.oneHitKill    = atoi(val) != 0;
-            else if (!strcmp(key, "noFallDamage"))  vals.noFallDamage  = atoi(val) != 0;
-            else if (!strcmp(key, "easyParry"))     vals.easyParry     = atoi(val) != 0;
-            else if (!strcmp(key, "noBounty"))      vals.noBounty      = atoi(val) != 0;
-            else if (!strcmp(key, "language"))      snprintf(vals.language, sizeof(vals.language), "%s", val);
-            else if (!strcmp(key, "themeIndex"))    vals.themeIndex    = atoi(val);
-            else if (!strcmp(key, "fileLogging"))   vals.fileLogging   = atoi(val) != 0;
-            else if (!strcmp(key, "infStamina"))    vals.infStamina    = atoi(val) != 0;
-            else if (!strcmp(key, "infSpirit"))     vals.infSpirit     = atoi(val) != 0;
-            else if (!strcmp(key, "dmgOutMult"))    vals.dmgOutMult    = strtof(val, nullptr);
-            else if (!strcmp(key, "dmgInMult"))     vals.dmgInMult     = strtof(val, nullptr);
-            else if (!strcmp(key, "gameSpeed"))     vals.gameSpeed     = atoi(val) != 0;
-            else if (!strcmp(key, "gameSpeedMult")) vals.gameSpeedMult = strtof(val, nullptr);
-            else if (!strcmp(key, "timeFrozen"))    vals.timeFrozen    = atoi(val) != 0;
-            else if (!strcmp(key, "superRun"))      vals.superRun      = atoi(val) != 0;
-            else if (!strcmp(key, "superRunMult"))  vals.superRunMult  = strtof(val, nullptr);
-            else if (!strcmp(key, "superJump"))     vals.superJump     = atoi(val) != 0;
-            else if (!strcmp(key, "superJumpMult")) vals.superJumpMult = strtof(val, nullptr);
-            else if (!strcmp(key, "freeFlight"))    vals.freeFlight    = atoi(val) != 0;
-            else if (!strcmp(key, "flightSpeed"))   vals.flightSpeed   = strtof(val, nullptr);
-            else if (!strcmp(key, "trustMult"))     vals.trustMult     = atoi(val) != 0;
-            else if (!strcmp(key, "trustMultVal"))  vals.trustMultVal  = strtof(val, nullptr);
-            else if (!strcmp(key, "invSlotSize"))    vals.invSlotSize    = atoi(val) != 0;
-            else if (!strcmp(key, "invSlotSizeVal")) vals.invSlotSizeVal = atoi(val);
-            else if (!strcmp(key, "invStackSize"))    vals.invStackSize    = atoi(val) != 0;
+            if      (!strcmp(key, "openKeyVk"))       vals.openKeyVk      = atoi(val);
+            else if (!strcmp(key, "openPadMask"))     vals.openPadMask    = static_cast<unsigned int>(strtoul(val, nullptr, 0));
+            else if (!strcmp(key, "flyUpKeyVk"))      vals.flyUpKeyVk     = atoi(val);
+            else if (!strcmp(key, "flyDownKeyVk"))    vals.flyDownKeyVk   = atoi(val);
+            else if (!strcmp(key, "flyUpPadMask"))    vals.flyUpPadMask   = static_cast<unsigned int>(strtoul(val, nullptr, 0));
+            else if (!strcmp(key, "flyDownPadMask"))  vals.flyDownPadMask = static_cast<unsigned int>(strtoul(val, nullptr, 0));
+            else if (!strcmp(key, "autoSave"))        vals.autoSave       = atoi(val) != 0;
+            else if (!strcmp(key, "godMode"))         vals.godMode        = atoi(val) != 0;
+            else if (!strcmp(key, "oneHitKill"))      vals.oneHitKill     = atoi(val) != 0;
+            else if (!strcmp(key, "noFallDamage"))    vals.noFallDamage   = atoi(val) != 0;
+            else if (!strcmp(key, "easyParry"))       vals.easyParry      = atoi(val) != 0;
+            else if (!strcmp(key, "noBounty"))        vals.noBounty       = atoi(val) != 0;
+            else if (!strcmp(key, "language"))        snprintf(vals.language, sizeof(vals.language), "%s", val);
+            else if (!strcmp(key, "themeIndex"))      vals.themeIndex     = atoi(val);
+            else if (!strcmp(key, "fileLogging"))     vals.fileLogging    = atoi(val) != 0;
+            else if (!strcmp(key, "infStamina"))      vals.infStamina     = atoi(val) != 0;
+            else if (!strcmp(key, "infSpirit"))       vals.infSpirit      = atoi(val) != 0;
+            else if (!strcmp(key, "infMountStamina"))  vals.infMountStamina = atoi(val) != 0;
+            else if (!strcmp(key, "immuneFire"))       vals.immuneFire     = atoi(val) != 0;
+            else if (!strcmp(key, "immuneCold"))       vals.immuneCold     = atoi(val) != 0;
+            else if (!strcmp(key, "dmgOutMult"))      vals.dmgOutMult     = strtof(val, nullptr);
+            else if (!strcmp(key, "dmgInMult"))       vals.dmgInMult      = strtof(val, nullptr);
+            else if (!strcmp(key, "gameSpeed"))       vals.gameSpeed      = atoi(val) != 0;
+            else if (!strcmp(key, "gameSpeedMult"))   vals.gameSpeedMult  = strtof(val, nullptr);
+            else if (!strcmp(key, "timeFrozen"))      vals.timeFrozen     = atoi(val) != 0;
+            else if (!strcmp(key, "superRun"))        vals.superRun       = atoi(val) != 0;
+            else if (!strcmp(key, "superRunMult"))    vals.superRunMult   = strtof(val, nullptr);
+            else if (!strcmp(key, "superJump"))       vals.superJump      = atoi(val) != 0;
+            else if (!strcmp(key, "superJumpMult"))   vals.superJumpMult  = strtof(val, nullptr);
+            else if (!strcmp(key, "freeFlight"))      vals.freeFlight     = atoi(val) != 0;
+            else if (!strcmp(key, "flightSpeed"))     vals.flightSpeed    = strtof(val, nullptr);
+            else if (!strcmp(key, "trustMult"))       vals.trustMult      = atoi(val) != 0;
+            else if (!strcmp(key, "trustMultVal"))    vals.trustMultVal   = strtof(val, nullptr);
+            else if (!strcmp(key, "invSlotSize"))     vals.invSlotSize    = atoi(val) != 0;
+            else if (!strcmp(key, "invSlotSizeVal"))  vals.invSlotSizeVal = atoi(val);
+            else if (!strcmp(key, "invStackSize"))    vals.invStackSize   = atoi(val) != 0;
             else if (!strcmp(key, "invStackSizeVal")) vals.invStackSizeVal = atoi(val);
-            else if (!strcmp(key, "showFps"))       vals.showFps       = atoi(val) != 0;
+            else if (!strcmp(key, "itemPreview"))     vals.itemPreview    = atoi(val) != 0;
+            else if (!strcmp(key, "showFps"))         vals.showFps        = atoi(val) != 0;
         }
         fclose(f);
 
@@ -128,11 +132,11 @@ namespace trinity
 
         // Clamp the floats to the same ranges the menu rows enforce, in case
         // the file was hand-edited.
-        st.godMode       = vals.godMode;
-        st.oneHitKill    = vals.oneHitKill;
-        st.noFallDamage  = vals.noFallDamage;
-        st.easyParry     = vals.easyParry;
-        st.noBounty      = vals.noBounty;
+        st.godMode         = vals.godMode;
+        st.oneHitKill      = vals.oneHitKill;
+        st.noFallDamage    = vals.noFallDamage;
+        st.easyParry       = vals.easyParry;
+        st.noBounty        = vals.noBounty;
         snprintf(st.language, sizeof(st.language), "%s", vals.language);
         // Apply before the menu first draws, and before the font atlas is built.
         i18n::SetLanguageByCode(st.language);
@@ -140,26 +144,32 @@ namespace trinity
         ui::SetTheme(st.themeIndex);
         st.fileLogging = vals.fileLogging;
         if (!st.fileLogging) trinity::Logger::DisableFile();
-        st.infStamina    = vals.infStamina;
-        st.infSpirit     = vals.infSpirit;
-        st.dmgOutMult    = ClampF(vals.dmgOutMult, 0.0f, 20.0f);
-        st.dmgInMult     = ClampF(vals.dmgInMult, 0.0f, 10.0f);
-        st.gameSpeed     = vals.gameSpeed;
-        st.gameSpeedMult = ClampF(vals.gameSpeedMult, 0.1f, 5.0f);
-        st.timeFrozen    = vals.timeFrozen;
-        st.superRun      = vals.superRun;
-        st.superRunMult  = ClampF(vals.superRunMult, 1.0f, 10.0f);
-        st.superJump     = vals.superJump;
-        st.superJumpMult = ClampF(vals.superJumpMult, 1.0f, 10.0f);
-        st.freeFlight    = vals.freeFlight;
-        st.flightSpeed   = ClampF(vals.flightSpeed, 1.0f, 40.0f);
-        st.trustMult     = vals.trustMult;
-        st.trustMultVal  = ClampF(vals.trustMultVal, 1.0f, 25.0f);
+        // The old separate mount toggle is now the same feature. Carry an
+        // existing enabled setting forward instead of silently turning it off.
+        st.infStamina      = vals.infStamina || vals.infMountStamina;
+        st.infSpirit       = vals.infSpirit;
+        st.infMountStamina = false;
+        st.immuneFire      = vals.immuneFire;
+        st.immuneCold      = vals.immuneCold;
+        st.dmgOutMult      = ClampF(vals.dmgOutMult, 0.0f, 20.0f);
+        st.dmgInMult       = ClampF(vals.dmgInMult, 0.0f, 10.0f);
+        st.gameSpeed       = vals.gameSpeed;
+        st.gameSpeedMult   = ClampF(vals.gameSpeedMult, 0.1f, 5.0f);
+        st.timeFrozen      = vals.timeFrozen;
+        st.superRun        = vals.superRun;
+        st.superRunMult    = ClampF(vals.superRunMult, 1.0f, 10.0f);
+        st.superJump       = vals.superJump;
+        st.superJumpMult   = ClampF(vals.superJumpMult, 1.0f, 10.0f);
+        st.freeFlight      = vals.freeFlight;
+        st.flightSpeed     = ClampF(vals.flightSpeed, 1.0f, 40.0f);
+        st.trustMult       = vals.trustMult;
+        st.trustMultVal    = ClampF(vals.trustMultVal, 1.0f, 25.0f);
         st.invSlotSize     = vals.invSlotSize;
         st.invSlotSizeVal  = ClampI(vals.invSlotSizeVal, 1, 9999);
         st.invStackSize    = vals.invStackSize;
         st.invStackSizeVal = ClampI(vals.invStackSizeVal, 1, 999999999);
-        st.showFps       = vals.showFps;
+        st.itemPreview     = vals.itemPreview;
+        st.showFps         = vals.showFps;
         LOG_OK("Trinity.ini loaded - restored feature settings from last session.");
     }
 
@@ -210,6 +220,9 @@ namespace trinity
                 "fileLogging=%d\n"
                 "infStamina=%d\n"
                 "infSpirit=%d\n"
+                "infMountStamina=%d\n"
+                "immuneFire=%d\n"
+                "immuneCold=%d\n"
                 "dmgOutMult=%.3f\n"
                 "dmgInMult=%.3f\n"
                 "gameSpeed=%d\n"
@@ -227,6 +240,7 @@ namespace trinity
                 "invSlotSizeVal=%d\n"
                 "invStackSize=%d\n"
                 "invStackSizeVal=%d\n"
+                "itemPreview=%d\n"
                 "showFps=%d\n",
                 st.openKeyVk,
                 st.openPadMask,
@@ -245,6 +259,9 @@ namespace trinity
                 st.fileLogging ? 1 : 0,
                 st.infStamina ? 1 : 0,
                 st.infSpirit ? 1 : 0,
+                st.infMountStamina ? 1 : 0,
+                st.immuneFire ? 1 : 0,
+                st.immuneCold ? 1 : 0,
                 st.dmgOutMult,
                 st.dmgInMult,
                 st.gameSpeed ? 1 : 0,
@@ -262,6 +279,7 @@ namespace trinity
                 st.invSlotSizeVal,
                 st.invStackSize ? 1 : 0,
                 st.invStackSizeVal,
+                st.itemPreview ? 1 : 0,
                 st.showFps ? 1 : 0);
         const bool ok = fflush(f) == 0;
         fclose(f);
@@ -280,35 +298,39 @@ namespace trinity
         // (menuOpen, textCapture, autoSave) is deliberately left alone.
         const State def;
         State&      st = State::Get();
-        st.godMode       = def.godMode;
-        st.oneHitKill    = def.oneHitKill;
-        st.noFallDamage  = def.noFallDamage;
-        st.easyParry     = def.easyParry;
-        st.noBounty      = def.noBounty;
+        st.godMode         = def.godMode;
+        st.oneHitKill      = def.oneHitKill;
+        st.noFallDamage    = def.noFallDamage;
+        st.easyParry       = def.easyParry;
+        st.noBounty        = def.noBounty;
         snprintf(st.language, sizeof(st.language), "%s", def.language);
         st.themeIndex = def.themeIndex;
         ui::SetTheme(st.themeIndex);
         st.fileLogging = def.fileLogging;
-        st.infStamina    = def.infStamina;
-        st.infSpirit     = def.infSpirit;
-        st.dmgOutMult    = def.dmgOutMult;
-        st.dmgInMult     = def.dmgInMult;
-        st.gameSpeed     = def.gameSpeed;
-        st.gameSpeedMult = def.gameSpeedMult;
-        st.timeFrozen    = def.timeFrozen;
-        st.superRun      = def.superRun;
-        st.superRunMult  = def.superRunMult;
-        st.superJump     = def.superJump;
-        st.superJumpMult = def.superJumpMult;
-        st.freeFlight    = def.freeFlight;
-        st.flightSpeed   = def.flightSpeed;
-        st.trustMult     = def.trustMult;
-        st.trustMultVal  = def.trustMultVal;
+        st.infStamina      = def.infStamina;
+        st.infSpirit       = def.infSpirit;
+        st.infMountStamina = def.infMountStamina;
+        st.immuneFire      = def.immuneFire;
+        st.immuneCold      = def.immuneCold;
+        st.dmgOutMult      = def.dmgOutMult;
+        st.dmgInMult       = def.dmgInMult;
+        st.gameSpeed       = def.gameSpeed;
+        st.gameSpeedMult   = def.gameSpeedMult;
+        st.timeFrozen      = def.timeFrozen;
+        st.superRun        = def.superRun;
+        st.superRunMult    = def.superRunMult;
+        st.superJump       = def.superJump;
+        st.superJumpMult   = def.superJumpMult;
+        st.freeFlight      = def.freeFlight;
+        st.flightSpeed     = def.flightSpeed;
+        st.trustMult       = def.trustMult;
+        st.trustMultVal    = def.trustMultVal;
         st.invSlotSize     = def.invSlotSize;
         st.invSlotSizeVal  = def.invSlotSizeVal;
         st.invStackSize    = def.invStackSize;
         st.invStackSizeVal = def.invStackSizeVal;
-        st.showFps       = def.showFps;
+        st.itemPreview     = def.itemPreview;
+        st.showFps         = def.showFps;
     }
 
     void Settings::ResetBinds()

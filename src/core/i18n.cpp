@@ -1,9 +1,11 @@
 #include "i18n.h"
+#include "i18n_embedded.h"
 
 #include <Windows.h>
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -26,11 +28,6 @@ namespace trinity::i18n
         // strings live in an arena that is only ever appended to. A deque never
         // moves the elements it already holds, so a pointer taken today is still
         // good after any number of later insertions or language switches.
-        //
-        // The cost is bounded and tiny: one copy of a table per switch, roughly
-        // 6 KB for the current 146 strings, and nobody switches language often
-        // enough for that to matter. Predictability is worth more here than the
-        // handful of kilobytes.
         std::deque<std::string> g_arena;
 
         const char* Intern(const std::string& s)
@@ -43,7 +40,9 @@ namespace trinity::i18n
         {
             const char* code;   // interned
             const char* name;   // interned
-            std::string path;   // empty for built-in English
+            std::string path;   // empty for built-in English / embedded
+            const TranslationEntry* embeddedEntries = nullptr;
+            size_t embeddedCount = 0;
         };
 
         std::vector<Language> g_langs;
@@ -116,21 +115,13 @@ namespace trinity::i18n
             return !code->empty() && !name->empty();
         }
 
-        void LoadTable(const std::string& path)
+        void ParseLinesIntoTable(const std::vector<std::string>& lines, const char* sourceName)
         {
-            g_table.clear();          // keys are owned copies; values live in the arena
-            FILE* f = fopen(path.c_str(), "rb");
-            if (!f)
-            {
-                LOG_WARN("localisation: could not open %s - staying in English.", path.c_str());
-                return;
-            }
-            char line[1024];
+            g_table.clear();
             bool inLanguageHeader = false, first = true;
-            size_t n = 0, candidates = 0;
-            while (fgets(line, sizeof(line), f))
+            size_t n = 0;
+            for (std::string s : lines)
             {
-                std::string s(line);
                 if (first) { StripBom(s); first = false; }
                 Trim(s);
                 if (s.empty() || s[0] == ';' || s[0] == '#') continue;
@@ -139,39 +130,50 @@ namespace trinity::i18n
                     inLanguageHeader = (_stricmp(s.c_str(), "[Language]") == 0);
                     continue;
                 }
-                // Split on the FIRST '=' so an English key containing '=' works.
                 const size_t eq = s.find('=');
                 if (eq == std::string::npos || eq == 0) continue;
                 std::string k = s.substr(0, eq), v = s.substr(eq + 1);
                 Trim(k); Trim(v);
-
-                // Only Name and Code belong to the [Language] header. Skipping
-                // EVERY line under that header - which is what this did before -
-                // silently discarded whole files, because the shipped ones put
-                // their translations straight after [Language] with no second
-                // section. Naming the two header keys instead means the format
-                // works with or without a section for the text, which is also
-                // what someone hand-editing one of these will expect.
                 if (inLanguageHeader &&
                     (_stricmp(k.c_str(), "Name") == 0 || _stricmp(k.c_str(), "Code") == 0))
                     continue;
 
-                ++candidates;
-                if (k.empty() || v.empty()) continue;          // blank = not translated yet
+                if (k.empty() || v.empty()) continue;
                 g_table[std::move(k)] = Intern(v);
                 ++n;
             }
+            LOG("localisation: loaded %zu translation(s) from %s", n, sourceName);
+        }
+
+        void LoadTable(const std::string& path)
+        {
+            FILE* f = fopen(path.c_str(), "rb");
+            if (!f)
+            {
+                LOG_WARN("localisation: could not open %s - staying in English.", path.c_str());
+                return;
+            }
+            char line[1024];
+            std::vector<std::string> lines;
+            while (fgets(line, sizeof(line), f))
+                lines.emplace_back(line);
             fclose(f);
 
-            // A file that parsed to nothing is a format problem, not a language
-            // with no translations - say so instead of sitting silently in
-            // English and letting it look like the switch did not work.
-            if (n == 0)
-                LOG_WARN("localisation: %s yielded no translations (%zu candidate line(s)) - "
-                         "check it is 'English text=translated text', UTF-8, one per line.",
-                         path.c_str(), candidates);
-            else
-                LOG("localisation: loaded %zu translation(s) from %s", n, path.c_str());
+            ParseLinesIntoTable(lines, path.c_str());
+        }
+
+        void LoadEmbeddedTable(const TranslationEntry* entries, size_t count, const char* langName)
+        {
+            g_table.clear();
+            if (!entries || count == 0) return;
+            for (size_t i = 0; i < count; ++i)
+            {
+                if (entries[i].key && entries[i].val && *entries[i].key && *entries[i].val)
+                {
+                    g_table[entries[i].key] = Intern(entries[i].val);
+                }
+            }
+            LOG("localisation: loaded %zu embedded translation(s) for %s", count, langName);
         }
     }
 
@@ -181,35 +183,59 @@ namespace trinity::i18n
         g_discovered = true;
 
         g_langs.clear();
-        g_langs.push_back({ Intern("en"), Intern("English"), "" }); // built in, never a file
+        g_langs.push_back({ Intern("en"), Intern("English"), "", nullptr, 0 }); // built in
 
         const std::string dir = ModuleDir();
-        if (dir.empty()) return;
-
-        const std::string pattern = dir + "\\Languages\\Trinity_*.ini";
-        WIN32_FIND_DATAA fd{};
-        HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
-        if (h == INVALID_HANDLE_VALUE)
+        std::vector<std::string> searchDirs;
+        if (!dir.empty())
         {
-            LOG("localisation: no Languages folder - English only.");
-            return;
+            searchDirs.push_back(dir + "\\Languages");
+            searchDirs.push_back(dir + "\\..\\Languages");
         }
-        do
-        {
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-            const std::string full = dir + "\\Languages\\" + fd.cFileName;
-            std::string code, name;
-            if (!ReadHeader(full, &code, &name))
-            {
-                LOG_WARN("localisation: %s has no [Language] Name/Code - skipped.", fd.cFileName);
-                continue;
-            }
-            if (_stricmp(code.c_str(), "en") == 0) continue;   // English is built in
-            g_langs.push_back({ Intern(code), Intern(name), full });
-        } while (FindNextFileA(h, &fd));
-        FindClose(h);
 
-        LOG("localisation: discovered %zu language(s) besides English.", g_langs.size() - 1);
+        for (const auto& sdir : searchDirs)
+        {
+            const std::string pattern = sdir + "\\Trinity_*.ini";
+            WIN32_FIND_DATAA fd{};
+            HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
+            if (h != INVALID_HANDLE_VALUE)
+            {
+                do
+                {
+                    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                    const std::string full = sdir + "\\" + fd.cFileName;
+                    std::string code, name;
+                    if (!ReadHeader(full, &code, &name)) continue;
+                    if (_stricmp(code.c_str(), "en") == 0) continue;
+
+                    bool exists = false;
+                    for (const auto& l : g_langs)
+                    {
+                        if (_stricmp(l.code, code.c_str()) == 0) { exists = true; break; }
+                    }
+                    if (!exists)
+                        g_langs.push_back({ Intern(code), Intern(name), full, nullptr, 0 });
+                } while (FindNextFileA(h, &fd));
+                FindClose(h);
+            }
+        }
+
+        // Add embedded languages if not present from disk
+        for (size_t i = 0; i < kEmbeddedLangsCount; ++i)
+        {
+            const auto& el = kEmbeddedLangs[i];
+            bool exists = false;
+            for (const auto& l : g_langs)
+            {
+                if (_stricmp(l.code, el.code) == 0) { exists = true; break; }
+            }
+            if (!exists)
+            {
+                g_langs.push_back({ Intern(el.code), Intern(el.name), "", el.entries, el.count });
+            }
+        }
+
+        LOG("localisation: discovered %zu language(s) (including built-ins).", g_langs.size() - 1);
     }
 
     int LanguageCount() { Discover(); return static_cast<int>(g_langs.size()); }
@@ -233,8 +259,17 @@ namespace trinity::i18n
         Discover();
         if (index < 0 || index >= static_cast<int>(g_langs.size())) return;
         g_current = index;
-        if (g_langs[index].path.empty()) { g_table.clear(); return; }   // English
-        LoadTable(g_langs[index].path);
+        if (g_langs[index].embeddedEntries)
+        {
+            LoadEmbeddedTable(g_langs[index].embeddedEntries, g_langs[index].embeddedCount, g_langs[index].name);
+            return;
+        }
+        if (!g_langs[index].path.empty())
+        {
+            LoadTable(g_langs[index].path);
+            return;
+        }
+        g_table.clear(); // English
     }
 
     void SetLanguageByCode(const char* code)

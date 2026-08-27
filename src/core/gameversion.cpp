@@ -18,9 +18,10 @@ namespace trinity
         // say so rather than imply a guarantee that was never made.
         struct KnownBuild { uint16_t revision; const char* tu; bool verified; };
         constexpr KnownBuild kKnown[] = {
-            { 2474, "1.18.02", true  },  // verified: every signature re-checked
-            { 2435, "1.18.0",  true  },
-            { 2330, "1.17.00", true  },
+            { 2625, "2.00.00",          true  },  // verified: every signature re-checked
+            { 2474, "1.18.02",          true  },
+            { 2435, "1.18.0",           true  },
+            { 2330, "1.17.00",          true  },
         };
 
         GameVersion g_version;

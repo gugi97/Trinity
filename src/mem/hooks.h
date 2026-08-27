@@ -11,8 +11,8 @@
 
 namespace trinity::mem
 {
-    // Finds `sig` (warning if it isn't uniquely matched, up to `maxMatches`
-    // probes) and installs a MinHook detour at the resolved address - the
+    // Finds `sig` (refusing an ambiguous match, up to `maxMatches` probes) and
+    // installs a MinHook detour at the resolved address - the
     // find/warn/hook/log sequence every game/*.cpp Install() otherwise
     // repeats by hand. `context` prefixes every log line (e.g.
     // "player: stat-accessor") and `consequence` names what's lost on
@@ -38,7 +38,11 @@ namespace trinity::mem
 
         const size_t matches = CountMatches(sig, maxMatches);
         if (matches != 1)
-            LOG_WARN("%s signature ambiguous (%zu); hooking first.", context, matches);
+        {
+            LOG_ERR("%s signature ambiguous (%zu); refusing hook - %s.",
+                    context, matches, consequence);
+            return false;
+        }
 
         void* t = reinterpret_cast<void*>(addr);
         if (MH_CreateHook(t, reinterpret_cast<void*>(detour), reinterpret_cast<void**>(original)) != MH_OK ||
@@ -74,6 +78,14 @@ namespace trinity::mem
         if (which > 0)
             LOG_WARN("%s matched fallback pattern #%zu - this game build moved the "
                      "current one, so please report it.", context, which);
+
+        const size_t matches = CountMatches(*(sigs.begin() + which));
+        if (matches != 1)
+        {
+            LOG_ERR("%s signature ambiguous (%zu); refusing hook - %s.",
+                    context, matches, consequence);
+            return false;
+        }
 
         void* t = reinterpret_cast<void*>(addr);
         if (MH_CreateHook(t, reinterpret_cast<void*>(detour), reinterpret_cast<void**>(original)) != MH_OK ||

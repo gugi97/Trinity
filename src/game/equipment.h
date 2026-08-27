@@ -115,7 +115,10 @@ namespace trinity::game
         // server realm; a false there means some of it is session-only, which
         // the caller should say rather than imply a clean success.
         static int RefineAllMax(bool* persistedAll = nullptr);
-        static int UnlockAllSockets();
+        // Sets every worn piece's endurance to its own maximum. Returns how many
+    // were below it; pieces the game gives no durability are untouched.
+    static int RepairAllWorn();
+    static int UnlockAllSockets();
         static int ClearAllGears(bool* persistedAll = nullptr);
 
         // Game-thread upkeep: after a socket edit, re-aggregates the equipped

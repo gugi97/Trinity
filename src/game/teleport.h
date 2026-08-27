@@ -15,9 +15,59 @@ namespace trinity::game
         static bool Install();
         static void Remove();
 
-        // Last-seen live position (world x,y,z). Returns false if no write
-        // has been observed yet (e.g. still at the main menu).
-        static bool GetLastPosition(float* x, float* y, float* z);
+        // Last-seen live position (local x,y,z) and, when requested, the
+        // coherent world origin captured with it. Returns false if no write has
+        // been observed yet (e.g. still at the main menu).
+        static bool GetLastPosition(float* x, float* y, float* z,
+                                    float* originX = nullptr,
+                                    float* originY = nullptr,
+                                    float* originZ = nullptr);
+
+        // Last-seen map destination (world x,y,z). Updated whenever the game
+        // copies the destination into the marker manager. Returns false if no
+        // destination has been set this session.
+        static bool GetDestinationPosition(float* x, float* y, float* z);
+
+        // Move the player to a local position. Queued as an absolute world
+        // target, applied on the next movement tick, and followed by a short
+        // invulnerability window so a bad landing cannot kill you. False = not
+        // in the world yet.
+        static bool WarpTo(float x, float y, float z);
+        // Warp to the map/quest destination. Unlike a raw coordinate warp, this
+        // also stamps the destination vector at moveOwner+0x1B0 so the engine's
+        // own pathing/marker system accepts the teleport instead of correcting
+        // the proxy position back every frame.
+        static bool WarpToDestination();
+        // --- Saved locations ---------------------------------------------
+        // Named world coordinates kept for the current game session only.
+        static size_t BookmarkCount();
+        static bool   GetBookmark(size_t i, char* nameOut, size_t nameCap,
+                                  float* x, float* y, float* z);
+        static bool   AddBookmarkHere(const char* name);   // uses the live position
+        static bool   RenameBookmark(size_t i, const char* name);
+        static bool   DeleteBookmark(size_t i);
+        static bool   WarpToBookmark(size_t i);
+        // --- Map-marker search (research) --------------------------------
+        // Three-step memory search for wherever the world map keeps the
+        // marker you placed. Put a marker on a saved location, run step 1;
+        // move it to a second saved location, run step 2; move it once more
+        // (or to your current position) and run step 3. Results go to the log.
+        //
+        // If `useY` is true the scan looks for an X/Y/Z vec3 using the saved
+        // location's height as well as its X/Z. That is much sharper, but only
+        // works if the marker actually stores a Y. The default X/Z-only mode
+        // stays available because field evidence (a reference mod ships a
+        // `markerFallbackHeight` value) suggests the marker may only keep X/Z.
+        // Reads only - nothing is ever written by these.
+        static int    MarkerSearchStep1(float x, float y, float z, bool useY);
+        static int    MarkerSearchStep2(float x, float y, float z, bool useY);
+        static int    MarkerSearchStep3(float x, float y, float z, bool useY);
+
+        // Tolerance for the marker search, in world units. Default is 5; a
+        // tighter value removes false positives but may miss the marker if the
+        // map snaps the pin away from the saved spot. Loosen it only if Step 1
+        // returns zero with Y filter off.
+        static void   SetMarkerTolerance(float units);
 
         // True on frames where Free Flight is actively driving the player's
         // vertical velocity (a direction is held while airborne). Exposed so the

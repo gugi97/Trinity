@@ -534,7 +534,7 @@ namespace trinity::game
         {
             uintptr_t container = 0;
             ReadPtr(holder + kOff_InvHolder_Container, &container);
-            LOG("money/probe: holder=%p container=%p (Money storage type=%u)",
+            LOG("money: holder=%p container=%p (Money storage type=%u)",
                 reinterpret_cast<void*>(holder), reinterpret_cast<void*>(container),
                 moneyType);
 
@@ -567,7 +567,7 @@ namespace trinity::game
                 if (base < kMinPointer) continue;
 
                 char line[900];
-                int w = snprintf(line, sizeof(line), "money/probe: %s:", what);
+                int w = snprintf(line, sizeof(line), "money: %s:", what);
                 int found = 0;
                 for (uintptr_t off = 0; off <= 0x600 && found < 26; off += 8)
                 {
@@ -594,7 +594,7 @@ namespace trinity::game
                 }
                 LOG("%s", line);
             }
-            LOG("money/probe: compare these against the silver shown in game - "
+            LOG("money: compare these against the silver shown in game - "
                 "the one that matches is the balance.");
         }
 
@@ -1210,9 +1210,9 @@ namespace trinity::game
             // Indirect form (`mov r8, cs:<slot>`): the slot holds the char*,
             // so there is one more hop than the `lea r8, <str>` form.
             if (h->indirect && (!ReadPtr(target, &target) || target < kMinPointer)) return false;
-            char buf[32];
+            char buf[64];
             if (!ReadCString(target, buf, sizeof(buf))) return false;
-            if (strcmp(buf, h->name) != 0) return false;
+            if (_stricmp(buf, h->name) != 0) return false;
             // The table LOADER passes the same string but has a different
             // prologue, so this is what tells the resolver clone apart from it.
             const uintptr_t fn = FindItemPrologueAbove(match);
@@ -1355,23 +1355,32 @@ namespace trinity::game
         if (!g_itemTableGlobal)
             LOG_WARN("inventory: item-info table not found - items show generic labels and no categories.");
 
-        // The category tree (optional - without it everything lands in one
-        // "Uncategorised" group, which is still browsable and editable).
+        // The category tree (ItemGroupInfo is at +0x20 in the contiguous global table array)
         g_grpTableGlobal = FindTableGlobal(kStr_ItemGroupInfoTable);
+        if (!g_grpTableGlobal && g_itemTableGlobal)
+            g_grpTableGlobal = g_itemTableGlobal + 0x20;
         if (!g_grpTableGlobal)
             LOG_WARN("inventory: ItemGroupInfo table not found - items are not grouped.");
+        else
+            LOG("inventory: ItemGroupInfo table resolved @ %p.", reinterpret_cast<void*>(g_grpTableGlobal));
 
-        // Icon sprite names (optional - without it the UI draws no item or
-        // category icons, which is purely cosmetic).
+        // Icon sprite names (stringinfo is at +0x30 in the contiguous global table array)
         g_strTableGlobal = FindTableGlobal(kStr_StringInfoTable);
+        if (!g_strTableGlobal && g_itemTableGlobal)
+            g_strTableGlobal = g_itemTableGlobal + 0x30;
         if (!g_strTableGlobal)
             LOG_WARN("inventory: stringinfo table not found - no item or category icons.");
+        else
+            LOG("inventory: stringinfo table resolved @ %p.", reinterpret_cast<void*>(g_strTableGlobal));
 
-        // Storage names (optional - without it storages still list and edit,
-        // labelled by their engine key instead of the game's own text).
+        // Storage names (InventoryInfo is at +0x18 in the contiguous global table array)
         g_invTableGlobal = FindTableGlobal(kStr_InventoryInfoTable, /*indirect=*/true);
+        if (!g_invTableGlobal && g_itemTableGlobal)
+            g_invTableGlobal = g_itemTableGlobal + 0x18;
         if (!g_invTableGlobal)
             LOG_WARN("inventory: InventoryInfo table not found - storages show engine keys.");
+        else
+            LOG("inventory: InventoryInfo table resolved @ %p.", reinterpret_cast<void*>(g_invTableGlobal));
 
         // Real localised names (optional - falls back to prettified keys).
         const uintptr_t locGet = mem::FindPattern(kSig_LocStringGet);
@@ -2441,8 +2450,9 @@ namespace trinity::game
                              static_cast<int>(firstErr2));
             }
 
-            // Freed in the target realm, exactly once each, whatever happened.
-            if (planned) { __try { oFreePlacements(out); }     __except (EXCEPTION_EXECUTE_HANDLER) {} }
+            // A rejected plan does not return a placement vector. Freeing that
+            // unowned output caused the post-refusal access violation.
+            if (planned && err == 0) { __try { oFreePlacements(out); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
             if (built)   { __try { oItemValueDtor(itemVal); }  __except (EXCEPTION_EXECUTE_HANDLER) {} }
             return committed;
         }
@@ -2500,6 +2510,8 @@ namespace trinity::game
         AddRequest             g_addReq{};
         std::atomic<bool>      g_addPending{false};
         std::atomic<int>       g_addState{0}; // mirrors Inventory::AddState
+        // ponytail: keep the unsafe engine transaction off until a crash dump proves its ABI.
+        std::atomic<bool>      g_addQuarantined{true};
 
         // The one add, on the GAME thread: resolves both holders, allocates one
         // shared instance id from the server authority, and stamps the item into
@@ -2595,9 +2607,9 @@ namespace trinity::game
         {
             if (!g_bulkActive.load(std::memory_order_acquire)) return;
 
-            // A bounded slice per Tick: enough to drain a big category in a
-            // handful of frames, few enough that no single frame pays for it all.
-            constexpr int kPerTick = 16;
+            // The game owns this transaction's allocation and replication state.
+            // ponytail: one transaction per tick; raise only after runtime proof.
+            constexpr int kPerTick = 1;
             for (int n = 0; n < kPerTick; ++n)
             {
                 AddRequest req;
@@ -2780,6 +2792,11 @@ namespace trinity::game
     {
         if (qty < 1) return false;
         if (typeId == kInvSlot_EmptyType) return false;
+        if (g_addQuarantined.load(std::memory_order_relaxed))
+        {
+            SetAddFailure("Add Item is disabled while its engine transaction is under investigation");
+            return false;
+        }
         uintptr_t def = 0;
         if (!DefForRow(g_itemTableGlobal, typeId, &def)) return false; // unknown item
         if (g_addPending.load(std::memory_order_acquire)) return false; // one at a time
@@ -2799,6 +2816,11 @@ namespace trinity::game
     bool Inventory::AddItemsBulk(const uint16_t* typeIds, int count, int64_t qtyEach)
     {
         if (!typeIds || count <= 0 || qtyEach < 1) return false;
+        if (g_addQuarantined.load(std::memory_order_relaxed))
+        {
+            SetAddFailure("Add Item is disabled while its engine transaction is under investigation");
+            return false;
+        }
         if (g_bulkActive.load(std::memory_order_acquire)) return false; // one bulk at a time
 
         // Filter to known items up front, on this (render) thread, so the game
@@ -2859,6 +2881,71 @@ namespace trinity::game
 
         it.qty    = 0;
         it.typeId = kInvSlot_EmptyType; // reflect immediately until next Refresh
+        return true;
+    }
+
+    bool Inventory::MaxEnduranceForType(uint16_t typeId, uint16_t* out)
+    {
+        if (!out) return false;
+        uintptr_t def = 0;
+        if (!DefForRow(g_itemTableGlobal, typeId, &def)) return false;
+        uint16_t maxEnd = 0;
+        if (!Read16(def + kOff_ItemDef_MaxEndurance, &maxEnd)) return false;
+        if (maxEnd == 0 || maxEnd == 0xFFFF) return false;
+        *out = maxEnd;
+        return true;
+    }
+
+    bool Inventory::ItemDefAddr(uint16_t typeId, uintptr_t* out)
+    {
+        if (!out) return false;
+        return DefForRow(g_itemTableGlobal, typeId, out);
+    }
+
+    int Inventory::RepairAllCarried()
+    {
+        return 0;
+    }
+
+    bool Inventory::IsSpecialCategory(int cat)
+    {
+        const Group* g = CatGroupAt(cat);
+        if (!g) return false;
+        return ContainsNoCase(g->label, "quest") ||
+               ContainsNoCase(g->label, "bounty") ||
+               ContainsNoCase(g->label, "document") ||
+               ContainsNoCase(g->label, "memor") ||
+               ContainsNoCase(g->label, "recipe") ||
+               ContainsNoCase(g->label, "relic");
+    }
+
+    const char* Inventory::CatalogCategoryPlainName(int cat)
+    {
+        const Group* g = CatGroupAt(cat);
+        if (!g) return "";
+        if (strncmp(g->label, "ETC ", 4) == 0) return g->label + 4;
+        return g->label;
+    }
+
+    int Inventory::LostCount() { return 0; }
+    bool Inventory::GetLost(int, uint16_t*, int64_t*, char*, size_t) { return false; }
+    bool Inventory::RestoreLost(int) { return false; }
+    bool Inventory::RestoreAllLost() { return false; }
+    void Inventory::ForgetLost(int) {}
+    void Inventory::ClearLost() {}
+
+    bool Inventory::AddCampResources(int64_t qty)
+    {
+        const uint16_t campIds[] = { 11, 12, 13, 14, 15 };
+        return AddItemsBulk(campIds, static_cast<int>(sizeof(campIds) / sizeof(campIds[0])), qty);
+    }
+
+    bool Inventory::AddCurrencies(int64_t copperQty, int64_t goldQty, int64_t pearlQty, int64_t pouchQty)
+    {
+        if (copperQty > 0) AddItem(1, copperQty);
+        if (goldQty > 0)   AddItem(53, goldQty);
+        if (pearlQty > 0)  AddItem(2, pearlQty);
+        if (pouchQty > 0)  AddItem(105, pouchQty);
         return true;
     }
 }

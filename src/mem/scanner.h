@@ -26,8 +26,12 @@ namespace trinity::mem
     // match, or 0 if not present.
     //
     // This game is packed, so we do not trust PE section flags: the scan walks
-    // the module's actually-committed, readable pages (via VirtualQuery) rather
-    // than only sections marked executable. Robust against odd section layouts.
+    // the module's actually-committed pages via VirtualQuery rather than the
+    // section table. It prefers pages that are EXECUTABLE, because every
+    // pattern here describes instructions and a match in data is a false
+    // positive that corrupts the uniqueness checks. If a pattern is found
+    // nowhere executable it retries over all readable pages and logs a warning,
+    // so a region that has been unpacked but not yet reprotected still resolves.
     uintptr_t FindPattern(std::string_view pattern, const ModuleRegion& mod);
     inline uintptr_t FindPattern(std::string_view pattern) { return FindPattern(pattern, GameModule()); }
 
@@ -58,6 +62,8 @@ namespace trinity::mem
     // byte sequence (e.g. a `lea rdx, [rip+..]` opcode) by a semantic test -
     // such as "does this instruction reference *that* string" - without
     // materialising every hit.
+    // Executable pages only, no fallback - the predicate is expected to walk
+    // backwards into surrounding code, which only makes sense in code.
     uintptr_t FindPatternIf(std::string_view pattern, const ModuleRegion& mod,
                             bool (*visit)(uintptr_t match, void* ctx), void* ctx);
     inline uintptr_t FindPatternIf(std::string_view pattern,

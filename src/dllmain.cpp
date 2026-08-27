@@ -9,7 +9,7 @@ static DWORD WINAPI MainThread(LPVOID)
     return 0;
 }
 
-BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID lpReserved)
 {
     switch (reason)
     {
@@ -21,7 +21,15 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         break;
 
     case DLL_PROCESS_DETACH:
-        trinity::Mod::Get().Shutdown();
+        // If lpReserved != nullptr, the process is terminating (ExitProcess) and
+        // other threads/DirectX objects have already been destroyed by the OS.
+        // Calling complex unhooking and COM methods inside the loader lock on process exit
+        // causes STATUS_ACCESS_VIOLATION ("Unknown Hard Error").
+        // Only run full shutdown on dynamic unload (FreeLibrary: lpReserved == nullptr).
+        if (!lpReserved)
+        {
+            trinity::Mod::Get().Shutdown();
+        }
         break;
     }
     return TRUE;

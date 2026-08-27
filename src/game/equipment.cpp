@@ -299,7 +299,10 @@ namespace trinity::game
         // re-aggregators so a socket edit can take hold live (see Tick). If they
         // do not resolve, editing still works - the effect just waits for a
         // reload, exactly as it did before.
-        g_refresh = reinterpret_cast<EquipRefresh_t>(mem::FindPattern(kSig_EquipEffectRefresh));
+        const uintptr_t refresh = mem::FindPattern(kSig_EquipEffectRefresh);
+        g_refresh = mem::CountMatches(kSig_EquipEffectRefresh, 2) == 1
+            ? reinterpret_cast<EquipRefresh_t>(refresh)
+            : nullptr;
         if (!g_refresh)
             LOG("equipment: effect-refresh signature not found - sockets still apply "
                 "and persist; only the live stat bonus may need a re-equip to show.");
@@ -515,6 +518,72 @@ namespace trinity::game
         }
         LOG("equipment: refined %d/%d worn piece(s) to +%d.", changed, n, kRefineMax);
         return changed;
+    }
+
+
+    // Repair every worn piece to its own maximum.
+    //
+    // Worn gear is where durability actually bites, and an equip entry IS a
+    // TrItemValue - the same layout the inventory slots use - so the endurance
+    // field sits at the same +0x40 inside it. The maximum comes from the item
+    // table, which inventory.cpp owns; items the game gives no durability
+    // (max 0xFFFF) are left alone rather than handed a stat they never had.
+    int Equipment::RepairAllWorn()
+    {
+        uint16_t tags[kMaxWorn];
+        const int n = CollectTags(tags, kMaxWorn);
+        int repaired = 0, noDurability = 0, durableCount = 0;
+
+        const uintptr_t comp = ClientComp();
+        if (!comp) return 0;
+        const uintptr_t scomp = ServerComp();
+
+        for (int i = 0; i < n; ++i)
+        {
+            const uintptr_t entry = FindEntryByTag(comp, tags[i]);
+            if (!entry) continue;
+
+            uint16_t tid = 0;
+            if (!Read16(entry + kOff_InvSlot_TypeId, &tid) || tid == kInvSlot_EmptyType) continue;
+
+            uint16_t maxEnd = 0;
+            if (!Inventory::MaxEnduranceForType(tid, &maxEnd)) { ++noDurability; continue; }
+
+            // The client write is skipped when the piece is already whole, but
+            // the MIRROR is not - and that distinction is the bug this replaced.
+            // Gating both on the client value let a full client copy hide a
+            // damaged server copy, which the next reconcile pushed back onto
+            // the client; the piece then became permanently un-repairable,
+            // because every later press hit the same early-out.
+            uint16_t cur = 0;
+            if (Read16(entry + kOff_ItemVal_Endurance, &cur) && cur < maxEnd)
+            {
+                if (Write16(entry + kOff_ItemVal_Endurance, maxEnd)) ++repaired;
+            }
+
+            // Mirror into the server realm's copy of the same physical item so
+            // the repair survives the reconcile and the save - the same
+            // dual-realm recipe SetRefine uses, instance-guarded so a mid-change
+            // drift cannot write into a different item. An unreadable instance
+            // id now costs only the mirror, not the client repair above.
+            int64_t instId = 0;
+            if (scomp && Read64(entry + kOff_ItemVal_InstanceId, &instId))
+            {
+                const uintptr_t se = FindEntryByTag(scomp, tags[i]);
+                int64_t  sid  = 0;
+                uint16_t scur = 0;
+                if (se && Read64(se + kOff_ItemVal_InstanceId, &sid) && sid == instId &&
+                    Read16(se + kOff_ItemVal_Endurance, &scur) && scur < maxEnd)
+                {
+                    if (Write16(se + kOff_ItemVal_Endurance, maxEnd)) ++durableCount;
+                }
+            }
+        }
+
+        LOG("equipment: repaired %d/%d worn piece(s) to full - %d mirrored to the "
+            "server realm (%d have no durability).",
+            repaired, n, durableCount, noDurability);
+        return repaired;
     }
 
     int Equipment::UnlockAllSockets()

@@ -33,6 +33,18 @@ namespace trinity::ui
         inline constexpr ImU32 Knob       = IM_COL32(245, 245, 245, 255);
     }
 
+
+    // --- Item preview --------------------------------------------------------
+    // The item icons in a row are 24 px tall, which is fine for recognising a
+    // potion and useless for judging whether a bow looks right. A player asked
+    // for a bigger window; the better answer is to show the item large while
+    // it is highlighted, since the real problem is choosing gear by appearance
+    // without spawning a hundred of them first.
+    //
+    // RowBase records the highlighted row's sprite here; End() draws the panel.
+    // Both are cleared every Begin(), so a menu with no item rows shows nothing.
+    inline char  g_previewSprite[96] = {};
+    inline char  g_previewLabel[128] = {};
     inline constexpr int kMaxVisible = 12;
 
     // The row area is channel-split so the animated selection highlight can

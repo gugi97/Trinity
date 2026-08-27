@@ -106,7 +106,12 @@ namespace trinity::ui
                 const DWORD attr = GetFileAttributesA(path);
                 if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
                     continue;
-                if (ImFont* f = io.Fonts->AddFontFromFileTTF(path, size))
+                ImFontConfig cfg;
+                cfg.OversampleH = 1;
+                cfg.OversampleV = 1;
+                cfg.PixelSnapH  = true;
+                if (ImFont* f = io.Fonts->AddFontFromFileTTF(
+                        path, size, &cfg, io.Fonts->GetGlyphRangesCyrillic()))
                     return f;
             }
             return nullptr;

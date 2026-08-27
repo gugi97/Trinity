@@ -42,6 +42,9 @@ namespace trinity::game
         // character is picked up here. Must run on the game thread; the
         // movement-update tick drives it. Cheap and idempotent - a no-op when no
         // player is resolvable (not in world).
+        // Blocks all incoming damage for `ms` milliseconds. Used after a warp
+        // so a bad landing cannot kill you; see WarpGraceActive in player.cpp.
+        static void SetWarpGrace(unsigned ms);
         static void RefreshSelf();
 
         // True once at least one protagonist's health entry has been observed.

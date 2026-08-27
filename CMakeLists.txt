@@ -62,6 +62,7 @@ add_library(Trinity SHARED
     src/game/equipment.cpp
     src/game/friendly.cpp
     src/game/parry.cpp
+    src/game/weather.cpp
     src/game/pak.cpp
     src/hooks/dx12_hook.cpp
     src/hooks/input.cpp

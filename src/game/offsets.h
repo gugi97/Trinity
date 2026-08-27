@@ -171,6 +171,11 @@ namespace trinity::game
     inline constexpr const char* kSig_DamageApply =
         "48 89 5C 24 ?? 48 89 6C 24 ?? 48 89 74 24 ?? 57 48 83 EC ?? 49 8B C1 49 8B E8 0F B7 DA 48 8B F1 4D 85 C9";
 
+    // Mount stamina update hook (sub_1408BB280). Runs every frame for mounts
+    // and flying creatures, accumulating stamina at [rcx + 0x2c]. Unique match (1).
+    inline constexpr const char* kSig_MountStaminaTick =
+        "48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 55 41 56 41 57 48 8B EC 48 83 EC 70 48 8B F9 C5 F2 58 41 2C";
+
     // marker+0x18 -> the character's vital/target owner: the object battle
     // damage is addressed to (the `targetOwner` argument above). Validation:
     // its first qword points back at the marker.
@@ -404,6 +409,24 @@ namespace trinity::game
     inline constexpr const char* kSig_TravelToNode =
         "48 89 5C 24 18 89 54 24 10 48 89 4C 24 08 55 56 57 48 8D 6C 24 ?? "
         "48 81 EC ?? ?? ?? ?? 41 8B F8 33 DB 83 FA FF";
+
+    // --- Destination map marker update ---------------------------------------
+    inline constexpr const char* kSig_DestinationUpdate =
+        "48 8B C4 48 89 58 10 48 89 48 08 55 56 57 41 54 41 55 41 56 41 57 "
+        "48 8D 68 ?? 48 81 EC ?? ?? ?? ?? C5 F8 29 70 ?? 49 8B F8";
+
+    // --- Pathing helper ------------------------------------------------------
+    // When the movement system is following a map/quest destination, a pathing
+    // routine recomputes the desired movement vector every frame and writes it
+    // to moveOwner+0x1B0.
+    inline constexpr const char* kSig_PathingHelper =
+        "48 89 5C 24 08 48 89 74 24 18 55 57 41 56 48 8D 6C 24 ?? "
+        "48 81 EC ?? ?? ?? ?? 4D 8B F0 48 8B F2 66 C7 45 ?? 04 00 "
+        "C6 45 ?? 01 33 DB 48 89 5D ?? 48 89 5D ?? C5 FB 10 05";
+
+    // Marker origin prefix for coordinate rebasing
+    inline constexpr const char* kSig_MarkerOriginPrefix  = "C5 F8 5C 05";
+    inline constexpr uintptr_t   kOff_MoveOwner_MarkerVec = 0x1B0;
 
     // The destinations live in the LevelGimmickSceneObjectInfo registry, a global
     // (IDB qword_6185008), read through its resolver sub_396CC0(u32* sceneId)
@@ -833,50 +856,29 @@ namespace trinity::game
         "48 89 5C 24 ? 4C 89 44 24 ? 55 56 57 48 83 EC 30 41 0F B7 59";
     // Free the planner's placement vector (IDB sub_7D13B10, reached via the
     // 5-byte jmp thunk sub_332C40 - thunks cannot be signatured, so this is the
-    // target; calling it is identical). Its `imul rcx, rax, 0D8h` in the
-    // signature below IS the 216-byte placement stride - a nice self-check.
+    // target; calling it is identical). Its `imul rcx, rax, 0E0h` in the
+    // signature below IS the 224-byte placement stride - a nice self-check.
     inline constexpr const char* kSig_InvFreePlacements =
-        "48 89 5C 24 ? 57 48 83 EC 20 48 89 CB 48 8B 09 48 85 C9 74 ? 31 FF 39 7B "
-        "? 76 ? 0F 1F 40 ? 89 F8 48 69 C8 E0 00 00 00";
+        "48 83 EC 20 48 8B D9 48 8B 09 48 85 C9 74 ?? 33 FF 39 7B ?? 76 ?? "
+        "0F 1F 40 ?? 8B C7 48 69 C8 E0 00 00 00";
     // Byte offset of that `imul` immediate inside the match. We re-read it at
     // load and refuse Add Item unless it agrees with kPlacement_Stride - the
     // stride moving under us is precisely how a placement loop would start
     // writing into the wrong slot.
-    inline constexpr uintptr_t kOff_FreePlacements_StrideImm = 37;
+    inline constexpr uintptr_t kOff_FreePlacements_StrideImm = 31;
     // TrItemValue dtor (IDB sub_ED6DF40, via thunk sub_1F88270). Destroys the
     // sub-objects the ctor allocated; does NOT free the buffer itself.
     inline constexpr const char* kSig_TrItemValueDtor =
-        // 1.18.0: the trailing `mov edi, imm32` constant moved again (0x203 in
-        // the analysed build, 0x1FB now), so it is wildcarded rather than
-        // re-pinned. Located via the 0xC8-stride vector destructor that calls
-        // it, the same route as last time; it still reads value+0xC0.
-        // 1.18.02: a new `sub edi, dword [rip+..]` was inserted between the
-        // `mov edi, imm32` and the `xor esi, esi` the old pattern ended on, so
-        // it derailed right after the immediate. Pin the value+0xC0 read - that
-        // is the function's identity, and it is what the 0xC8-stride vector
-        // destructors call it for - and stop before the volatile tail.
-        "48 89 5C 24 ? 48 89 74 24 ? 48 89 4C 24 ? 57 48 83 EC 20 48 89 CB "
-        "48 8B 89 C0 00 00 00 BF";
+        "48 89 5C 24 ?? 48 89 6C 24 ?? 48 89 74 24 ?? 48 89 4C 24 ?? 57 48 83 EC 20 48 8B D9 "
+        "48 8B 89 C0 00 00 00";
 
     inline constexpr uintptr_t kOff_InvHolder_Container = 0x08; // holder+8 -> container
     // ItemInfo._defaultPushInventoryInfo - which storage this item goes to by
     // default. The commit re-reads it, but we need it to pick the bucket too.
-    // Read out of commit itself in 1.17.00 (it re-finds the bucket the same
-    // way we do), which resolves the def and then takes the storage type from
-    // +0x418 - not +66 as in the analysed build:
-    //     call  <iteminfo resolver>          ; rax = item def
-    //     movzx edx, word ptr [rax + 0x418]  ; default push inventory
-    //     mov   rax, qword ptr [rsi + 0x18]  ; holder bucket array
-    //     mov   ecx, dword ptr [rsi + 0x20]  ; bucket count
-    //     cmp   word ptr [rbx + 0x10], dx    ; bucket type  (unchanged)
-    // Reading +66 returned 0xFFFF, the sentinel, so no bucket ever matched and
-    // every add reported PARTIAL with nothing written.
-    //
-    // Note commit has a prior path we deliberately do not replicate: when
-    // def+0x270 is non-null it asks the holder for a preferred storage first
-    // and only falls back to +0x418 when that returns 0xFFFF. The fallback is
-    // the general case and is what the planner is happy with.
-    inline constexpr uintptr_t kOff_ItemDef_BucketType  = 0x418; // u16
+    // 1.17.00: +0x418.
+    // 1.18.02 (1.0.0.2625): moved +0x10 to +0x428 (confirmed from iteminfo caller @ 0x150221716:
+    //     movzx r8d, word ptr [rax + 0x428]
+    inline constexpr uintptr_t kOff_ItemDef_BucketType  = 0x428; // u16
     //
     // ★ The inventory CONTAINER *is* the player CHARACTER object - the very same
     // "owner" the player/god-mode code resolves. Live-confirmed 2026-07-15: the
@@ -1194,6 +1196,41 @@ namespace trinity::game
     inline constexpr uintptr_t kOff_LocProv_Offset   = 0x18; // fallback
     inline constexpr uintptr_t kOff_LocMgr_Size      = 0x68; // fallback
     inline constexpr uintptr_t kOff_LocMgr_Data      = 0x60; // fallback
+    // The stealth crime report function:
+    inline constexpr const char* kSig_ReportStealthExecute =
+        "48 89 5C 24 08 57 48 83 EC 40 48 8B DA 49 8B 78 70 44 0F B6 41 08 "
+        "48 8D 54 24 20 48 8B 0F E8 ?? ?? ?? ?? 90 80 7C 24 30 00 75 08 "
+        "C7 03 00 00 00 00 EB 22 48 8B 07 48 8B 40 08 48 8B 40 68 48 8B 54 24 28 "
+        "48 8B 88 B0 00 00 00";
+    // The theft crime & witness broadcast function (ClientStealItemInteractionProcessor -> sub_141F7A6B0):
+    inline constexpr const char* kSig_TheftCrimeReport =
+        "4C 89 4C 24 20 4C 89 44 24 18 48 89 54 24 10 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 A8 E7 FF FF";
+    // ClientStealItemInteractionProcessor::execute (vtable[2]) - top-level steal crime processor:
+    inline constexpr const char* kSig_ClientStealItemExecute =
+        "4C 8B DC 49 89 5B 08 49 89 6B 10 49 89 73 18 57 48 81 EC 90 00 00 00 49";
+    // ClientStealItemInteractionProcessor step/process (sub_141DF27A0):
+    inline constexpr const char* kSig_ClientStealItemProcess =
+        "48 89 5C 24 08 48 89 6C 24 18 48 89 74 24 20 57 41 54 41 55 41 56 41 57 48 81 EC 30 01 00 00";
+    // AIFunction_RegistCrime::execute (sub_141F9E370) - core AI crime registrar:
+    inline constexpr const char* kSig_AIFuncRegistCrime =
+        "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B 02 48 8B F9 48 8B CA 48 8B DA FF 50 08 4C 8B 07 48 8B CF 0F B7 F0 41 FF 50 08 66 3B C6 77 28 73 12 B0 FF";
+    // AIFunction_WitnessCriminalPlayer::execute (sub_141F98BF0) - core AI witness registrar:
+    inline constexpr const char* kSig_AIFuncWitnessCriminal =
+        "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B 02 48 8B F9 48 8B CA 48 8B DA FF 50 08 4C 8B 07 48 8B CF 0F B7 F0 41 FF 50 08 66 3B C6 77 1D 73 12 B0 FF";
+    // TrocTrWantedAddCrimeRecordReq handler (sub_1425E6D20) - core crime record recorder (pickpocket, assault, steal):
+    inline constexpr const char* kSig_WantedAddCrimeRecord =
+        "48 89 5C 24 08 55 56 57 41 54 41 55 41 56 41 57 48 8B EC 48 81 EC 80 00 00 00 49 8B F0 48 8B DA 4C 8B F1 4D 8B 78 18";
+    // TrocTrSetCrimeTargetReq handler (sub_1425E73A0) - marks player as crime target:
+    inline constexpr const char* kSig_SetCrimeTarget =
+        "48 89 5C 24 08 48 89 74 24 10 55 57 41 54 41 56 41 57 48 8B EC 48 83 EC 60 49";
+    inline constexpr uintptr_t kOff_WantedDef_UseTargetPrice = 0x20;
+
+    // --- World: Master Frame Update (Game Speed / Timescale) -----------------
+    // sub_140947B60: the engine's root frame updater. Passes context containing
+    // TimeManager (+0x60). Setting TimeManager.mode (+0x50) = 1 and TimeManager.timeScale
+    // (+0x54) = mult directly drives all animations, physics, AI, and combat simulation.
+    inline constexpr const char* kSig_MasterFrameUpdate =
+        "48 8B C4 48 89 58 10 48 89 68 18 48 89 70 20 57 41 56 41 57 48 81 EC D0 01 00 00 C5 F8 29 70 D8";
 
     // --- World: Game Speed (fixed-timestep override) ------------------------
     // The engine's per-frame timing update (IDB sub_8FBD80) measures the real
@@ -1219,8 +1256,8 @@ namespace trinity::game
     //   match+37: `vmovss xmm0, cs:dword_615A4F0`     (value; 8-byte instr)
     // IDB match at 0x8FC348. Unique block.
     inline constexpr const char* kSig_GameSpeed =
-        "80 3D ?? ?? ?? ?? 01 75 30 48 8B 4F 58 41 8B C7 C5 78 2F 61 64 0F 97 C0 "
-        "85 C0 74 09 80 3D ?? ?? ?? ?? 01 75 14 C5 FA 10 05 ?? ?? ?? ?? C5 FA 11 "
+        "80 3D ?? ?? ?? ?? 01 75 ?? 48 8B 4F ?? 41 8B C7 C5 78 2F 61 64 0F 97 C0 "
+        "85 C0 74 ?? 80 3D ?? ?? ?? ?? 01 75 ?? C5 FA 10 05 ?? ?? ?? ?? C5 FA 11 "
         "41 64 C6 05 ?? ?? ?? ?? 00";
     inline constexpr uintptr_t kOff_GameSpeed_FlagDisp    = 2;  // disp32 of cmp cs:byte_606B9CE,1
     inline constexpr uintptr_t kOff_GameSpeed_FlagEnd     = 7;  // next-instr addr for that cmp
@@ -1427,11 +1464,9 @@ namespace trinity::game
     // prologue through the arg shuffle (mov r15,r8; mov r12,rdx; mov r14,rcx;
     // mov r13,[rcx+8]); stack/frame immediates wildcarded. Unique.
     inline constexpr const char* kSig_EquipBatch =
-        // 1.18.0 re-allocated three registers in the arg shuffle; the shape is
-        // otherwise identical (r8->r12, rdx->r13, rcx->r14, [rcx+8]->r15).
         "48 89 5C 24 10 55 56 57 41 54 41 55 41 56 41 57 "
-        "48 8D AC 24 ? ? ? ? B8 ? ? ? ? "
-        "E8 ? ? ? ? 48 2B E0 4D 8B E0 4C 8B EA 4C 8B F1 4C 8B 79 08";
+        "48 8D AC 24 ?? ?? ?? ?? B8 ?? ?? ?? ?? "
+        "E8 ?? ?? ?? ?? 48 2B E0 4D 8B E0 4C 8B EA 4C 8B F1 4C 8B 79 08";
 
     // The client dye-ack applier (IDB sub_7D9C50):
     //     int* f(void* equipComponent, int* outErr, void* batch1960)
@@ -1547,8 +1582,8 @@ namespace trinity::game
     // Witch's socketing found sub_7C88A0 as the real entry.)
     // Signature: void* f(equipComponent, int* out).
     inline constexpr const char* kSig_EquipEffectRefresh =
-        "48 89 5C 24 ? 48 89 54 24 ? 48 89 4C 24 ? 55 56 57 41 54 41 55 41 56 41 57 "
-        "48 8B EC 48 83 EC 60 4C 8B F2";
+        "48 89 5C 24 20 55 56 57 48 8D 6C 24 B9 48 81 EC 90 00 00 00 "
+        "48 8B D9 80 B9 F8 00 00 00 00";
 
     // --- Why live REMOVAL of an abyss gear does not strip its effect -----------
     // (RE 2026-07-19, static trace of the whole effect cluster around sub_7C88A0)
@@ -1623,13 +1658,8 @@ namespace trinity::game
     // pre-seeded there, so the first in-game gift/feed is already scaled and a
     // loaded save is never re-scaled. See the trinity-friendly-system notes.
     inline constexpr const char* kSig_FriendlySetNpc =
-        // This function's base offset keeps flip-flopping between builds:
-        // 1.18.0 replaced `lea rbp,[rcx+0x18]` with a global load plus
-        // `lea rbp,[rcx+rax]`, and 1.18.02 put the constant back. Because the
-        // middle changes LENGTH, no single pattern covers both forms - so
-        // anchor on the prologue alone, which is unique in the image and does
-        // not care what the body does.
-        "49 89 E3 53 55 56 57 41 56 48 83 EC 60 48 89 D7";
+        "49 89 E3 53 55 56 57 41 56 48 83 EC 60 48 89 D7 B8 ?? ?? ?? ?? "
+        "03 05 ?? ?? ?? ?? 48 8D 2C 01 0F B7 42 04 66 41 89 43 08";
 
     // The 1.18.0 shape of the same function, kept as a fallback. That build
     // computed the base offset at runtime instead of baking it in, and since
@@ -1647,4 +1677,24 @@ namespace trinity::game
     inline constexpr uintptr_t kOff_FriendlyRec_Group = 0x04; // u16 group/bucket key
     inline constexpr uintptr_t kOff_FriendlyRec_Value = 0x20; // i64 trust value
     inline constexpr int64_t   kFriendly_Max          = 100;  // the taming cap
+
+    // 1.18.02 encodes the SAME function differently, and the pattern above
+    // cannot match it at any offset. `44 8B 41 ?` is the disp8 form of
+    // `mov r8d,[rcx+disp]`; this build needs disp32 - `44 8B 81 80 00 00 00` -
+    // which is a different ENCODING, not a different number.
+    inline constexpr const char* kSig_DyeUpsert_1180 =
+        "48 8B 41 78 4C 8B D1 44 8B 81 80 00 00 00 49 C1 E0 04";
+
+    // --- Durability / Repair ---------------------------------------------------
+    inline constexpr uintptr_t kOff_ItemDef_MaxEndurance = 0x3F0;   // u16, ItemInfo row
+    inline constexpr uintptr_t kOff_ItemVal_Endurance    = 0x40;    // u16, live item value
+    inline constexpr uint16_t  kEndurance_None           = 0xFFFF;  // "this item has none"
+    inline constexpr uintptr_t kOff_ItemDef_RepairDataList = 0x3F8; // vector
+
+    // How many slots Add Item quietly expands a storage to when it is about to overflow.
+    inline constexpr int kAddRoom_TargetSlots = 2000;
+
+    // Warp landing.
+    inline constexpr float    kWarp_RiseAbove = 30.0f;
+    inline constexpr unsigned kWarp_GraceMs   = 8000;
 }

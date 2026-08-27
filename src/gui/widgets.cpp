@@ -61,6 +61,15 @@ namespace trinity::ui
         const int  i  = g_rowIndex++;
         RowResult  r;
 
+        // Remember the highlighted row's item art for the preview panel. Done
+        // here rather than at the call sites because every row in the menu
+        // passes through this function, so no page has to know the panel exists.
+        if (i == ms.selected && itemIcon && itemIcon[0])
+        {
+            snprintf(g_previewSprite, sizeof(g_previewSprite), "%s", itemIcon);
+            snprintf(g_previewLabel,  sizeof(g_previewLabel),  "%s", label ? label : "");
+        }
+
         const bool visible = i >= ms.scroll && i < ms.scroll + kMaxVisible;
         if (visible)
         {
@@ -309,6 +318,14 @@ namespace trinity::ui
     bool Option(const char* label, const char* desc)
     {
         return RowBase(label, desc, RowKind::Action).activated;
+    }
+
+    bool OptionRemovable(const char* label, const char* desc, bool* outRemove)
+    {
+        const RowResult r = RowBase(label, desc, RowKind::Action);
+        if (outRemove) *outRemove = r.clear;
+        if (r.clear) g_nav.clear = false;   // consumed here, like every other row
+        return r.activated;
     }
 
     bool OptionItem(const char* label, const char* icon, const char* desc)
@@ -756,11 +773,17 @@ namespace trinity::ui
         return r.activated;
     }
 
-    bool Search(char* buf, size_t cap, const char* desc)
+    constexpr const char* SearchRowLabel(const char* label)
+    {
+        return label && label[0] ? label : "Search";
+    }
+    static_assert(SearchRowLabel("Name This Spot")[0] == 'N');
+
+    bool Search(char* buf, size_t cap, const char* desc, const char* label)
     {
         g_captureSeen = true;
 
-        RowResult r  = RowBase("Search", desc, RowKind::Search);
+        RowResult r  = RowBase(SearchRowLabel(label), desc, RowKind::Search);
         bool changed = false;
 
         // Enter (or click / A) toggles typing; moving off the row stops it.

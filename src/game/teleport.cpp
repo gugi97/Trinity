@@ -9,7 +9,10 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <cmath>
+#include <mutex>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -18,6 +21,7 @@
 #include "offsets.h"
 #include "player.h"
 #include "world.h"
+#include "weather.h"
 #include "inventory.h"
 #include "dye.h"
 #include "equipment.h"
@@ -41,7 +45,262 @@ namespace trinity::game
     namespace
     {
         std::atomic<float>    g_posX{0.0f}, g_posY{0.0f}, g_posZ{0.0f};
+        std::atomic<float>    g_posOriginX{0.0f}, g_posOriginY{0.0f}, g_posOriginZ{0.0f};
+        std::atomic<uint32_t> g_posSequence{0};
         std::atomic<bool>     g_posValid{false};
+
+        // Last-seen map destination. Captured from the game's own destination
+        // copy function (sub_BE3710), so it tracks whatever the world map / quest
+        // objective system considers the current destination.
+        std::atomic<float>    g_destX{0.0f}, g_destY{0.0f}, g_destZ{0.0f};
+        std::atomic<float>    g_destOriginX{0.0f}, g_destOriginY{0.0f}, g_destOriginZ{0.0f};
+        std::atomic<uint32_t> g_destSequence{0};
+        std::atomic<bool>     g_destValid{false};
+        uintptr_t             g_markerOriginAddress = 0;
+
+        // Queued warp request - written by the menu, consumed by the movement
+        // tick where the movement owner is known live. Some game systems (e.g.
+        // active destination pathing) correct the proxy position back every
+        // frame, so a single write can be overwritten immediately. The counter
+        // repeats the write for several ticks to outrun that correction.
+        constexpr int         kWarpHoldFrames = 6;
+        constexpr float WarpLandingRise(bool toMarker)
+        {
+            return toMarker ? kWarp_RiseAbove : 0.0f;
+        }
+
+        static_assert(WarpLandingRise(false) == 0.0f);
+        static_assert(WarpLandingRise(true) == kWarp_RiseAbove);
+
+        constexpr float LocalToWorld(float local, float origin) { return local + origin; }
+        constexpr float WorldToLocal(float world, float origin) { return world - origin; }
+        constexpr float CaptureWorldCoordinate(float local, float origin) { return LocalToWorld(local, origin); }
+
+        static_assert(LocalToWorld(-935.0f, -11000.0f) == -11935.0f);
+        static_assert(WorldToLocal(-11935.0f, -12000.0f) == 65.0f);
+        static_assert(WorldToLocal(-11935.0f, -11000.0f) == -935.0f);
+        static_assert(WorldToLocal(CaptureWorldCoordinate(-355.0f, -12000.0f), -11000.0f) == -1355.0f);
+
+        struct PlayerWorldSnapshot
+        {
+            float localX, localY, localZ;
+            float originX, originY, originZ;
+        };
+
+        bool LoadPlayerWorldSnapshot(PlayerWorldSnapshot* out)
+        {
+            if (!out || !g_posValid.load(std::memory_order_acquire)) return false;
+            for (int attempt = 0; attempt < 8; ++attempt)
+            {
+                const uint32_t before = g_posSequence.load(std::memory_order_acquire);
+                if (before & 1) continue;
+
+                PlayerWorldSnapshot value{
+                    g_posX.load(std::memory_order_relaxed),
+                    g_posY.load(std::memory_order_relaxed),
+                    g_posZ.load(std::memory_order_relaxed),
+                    g_posOriginX.load(std::memory_order_relaxed),
+                    g_posOriginY.load(std::memory_order_relaxed),
+                    g_posOriginZ.load(std::memory_order_relaxed),
+                };
+                const uint32_t after = g_posSequence.load(std::memory_order_acquire);
+                if (before == after && !(after & 1) &&
+                    std::isfinite(value.localX) && std::isfinite(value.localY) &&
+                    std::isfinite(value.localZ) && std::isfinite(value.originX) &&
+                    std::isfinite(value.originY) && std::isfinite(value.originZ))
+                {
+                    *out = value;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        struct DestinationSnapshot
+        {
+            float x, y, z;
+            float originX, originY, originZ;
+        };
+
+        bool LoadDestinationSnapshot(DestinationSnapshot* out)
+        {
+            if (!out || !g_destValid.load(std::memory_order_acquire)) return false;
+            for (int attempt = 0; attempt < 8; ++attempt)
+            {
+                const uint32_t before = g_destSequence.load(std::memory_order_acquire);
+                if (before & 1) continue;
+
+                DestinationSnapshot value{
+                    g_destX.load(std::memory_order_relaxed),
+                    g_destY.load(std::memory_order_relaxed),
+                    g_destZ.load(std::memory_order_relaxed),
+                    g_destOriginX.load(std::memory_order_relaxed),
+                    g_destOriginY.load(std::memory_order_relaxed),
+                    g_destOriginZ.load(std::memory_order_relaxed),
+                };
+                const uint32_t after = g_destSequence.load(std::memory_order_acquire);
+                if (before == after && !(after & 1) &&
+                    std::isfinite(value.x) && std::isfinite(value.y) &&
+                    std::isfinite(value.z) && std::isfinite(value.originX) &&
+                    std::isfinite(value.originY) && std::isfinite(value.originZ))
+                {
+                    *out = value;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        std::atomic<int>      g_warpPending{0}; // -1 = publishing, 0 = none, >0 = frames remaining
+        std::atomic<float>    g_warpWorldX{0.0f}, g_warpWorldY{0.0f}, g_warpWorldZ{0.0f};
+        std::atomic<uint32_t> g_warpSequence{0};
+        // True when the queued warp is a "destination" warp. Destination warps
+        // stamp both the live position and the engine's marker/destination
+        // vector at +0x1B0; without the latter the pathing servo corrects the
+        // proxy back to its previous location every frame.
+        std::atomic<bool>     g_warpToMarker{false};
+
+        constexpr bool ShouldStampDestinationWarp(int pending, bool toMarker)
+        {
+            return pending > 0 && toMarker;
+        }
+
+        constexpr bool ShouldCaptureGroundProbe(int pending, bool toMarker, unsigned samples)
+        {
+            return ShouldStampDestinationWarp(pending, toMarker) && samples < 8;
+        }
+
+        static_assert(!ShouldStampDestinationWarp(0, true));
+        static_assert(ShouldStampDestinationWarp(1, true));
+        static_assert(!ShouldStampDestinationWarp(6, false));
+
+        static_assert(ShouldCaptureGroundProbe(6, true, 0));
+        static_assert(!ShouldCaptureGroundProbe(0, true, 0));
+        static_assert(!ShouldCaptureGroundProbe(6, false, 0));
+        static_assert(!ShouldCaptureGroundProbe(6, true, 8));
+
+        constexpr uint32_t kGroundProbeBusy = 0x80000000u;
+        constexpr uint32_t kGroundProbeSamplesMask = ~kGroundProbeBusy;
+        std::atomic<uint64_t> g_groundProbeBudget{0};
+        std::atomic<uint32_t> g_postHoldSequence{0};
+        std::atomic<bool> g_postHoldLogged{false};
+
+        uint64_t PackGroundProbeBudget(uint32_t generation, uint32_t state)
+        {
+            return (static_cast<uint64_t>(generation) << 32) | state;
+        }
+
+        bool QueueWorldWarp(float x, float y, float z, bool toMarker)
+        {
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return false;
+            int idle = 0;
+            if (!g_warpPending.compare_exchange_strong(
+                    idle, -1, std::memory_order_acq_rel, std::memory_order_acquire)) return false;
+            g_warpWorldX.store(x, std::memory_order_relaxed);
+            g_warpWorldY.store(y, std::memory_order_relaxed);
+            g_warpWorldZ.store(z, std::memory_order_relaxed);
+            g_warpToMarker.store(toMarker, std::memory_order_relaxed);
+            g_warpSequence.fetch_add(1, std::memory_order_release);
+            g_warpPending.store(kWarpHoldFrames, std::memory_order_release);
+            return true;
+        }
+
+        struct ActiveWarp
+        {
+            float worldX, worldY, worldZ;
+            bool toMarker;
+            uint32_t sequence;
+        };
+
+        bool LoadActiveDestinationWarp(ActiveWarp* out)
+        {
+            if (!out) return false;
+            for (int attempt = 0; attempt < 8; ++attempt)
+            {
+                const uint32_t before = g_warpSequence.load(std::memory_order_acquire);
+                if (g_warpPending.load(std::memory_order_acquire) <= 0) return false;
+
+                ActiveWarp value{
+                    g_warpWorldX.load(std::memory_order_relaxed),
+                    g_warpWorldY.load(std::memory_order_relaxed),
+                    g_warpWorldZ.load(std::memory_order_relaxed),
+                    g_warpToMarker.load(std::memory_order_relaxed),
+                    before,
+                };
+                const uint32_t after = g_warpSequence.load(std::memory_order_acquire);
+                if (before == after &&
+                    g_warpPending.load(std::memory_order_acquire) > 0 &&
+                    value.toMarker && std::isfinite(value.worldX) &&
+                    std::isfinite(value.worldY) && std::isfinite(value.worldZ))
+                {
+                    *out = value;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        bool IsActiveWarp(const ActiveWarp& warp)
+        {
+            return g_warpSequence.load(std::memory_order_acquire) == warp.sequence &&
+                   g_warpPending.load(std::memory_order_acquire) > 0;
+        }
+
+        bool ReserveGroundProbe(const ActiveWarp& warp, unsigned* sample)
+        {
+            if (!sample) return false;
+            for (;;)
+            {
+                uint64_t current = g_groundProbeBudget.load(std::memory_order_acquire);
+                const uint32_t generation = static_cast<uint32_t>(current >> 32);
+                uint32_t state = static_cast<uint32_t>(current);
+                if (generation != warp.sequence)
+                {
+                    const uint64_t reset = PackGroundProbeBudget(warp.sequence, 0);
+                    if (!g_groundProbeBudget.compare_exchange_weak(
+                            current, reset, std::memory_order_acq_rel, std::memory_order_acquire))
+                        continue;
+                    state = 0;
+                }
+
+                if ((state & kGroundProbeBusy) ||
+                    !ShouldCaptureGroundProbe(g_warpPending.load(std::memory_order_acquire),
+                                              warp.toMarker, state & kGroundProbeSamplesMask))
+                    return false;
+
+                uint64_t expected = PackGroundProbeBudget(warp.sequence, state);
+                if (g_groundProbeBudget.compare_exchange_weak(
+                        expected, PackGroundProbeBudget(warp.sequence, state | kGroundProbeBusy),
+                        std::memory_order_acq_rel, std::memory_order_acquire))
+                {
+                    *sample = state & kGroundProbeSamplesMask;
+                    return true;
+                }
+            }
+        }
+
+        void ReleaseGroundProbe(const ActiveWarp& warp, unsigned sample, bool emitted)
+        {
+            uint64_t expected = PackGroundProbeBudget(warp.sequence, kGroundProbeBusy | sample);
+            const uint32_t next = emitted ? sample + 1 : sample;
+            g_groundProbeBudget.compare_exchange_strong(
+                expected, PackGroundProbeBudget(warp.sequence, next),
+                std::memory_order_release, std::memory_order_relaxed);
+        }
+
+        // --- Pathing helper hook -------------------------------------------
+        // The pathing routine recomputes the desired vector at moveOwner+0x1B0
+        // every frame. A destination warp must override that write, otherwise
+        // the engine immediately pulls the proxy back. We hook a small helper
+        // that the pathing routine calls with r9 = &moveOwnerPtr; stamping the
+        // warp target before and after the original call keeps the proxy at the
+        // destination for the duration of the warp.
+        using PathingHelper_t = char(__fastcall*)(void* rcx, void* rdx, void* r8, void* r9,
+                                                  void* stackArg5, void* stackArg6);
+        static_assert(std::is_same_v<PathingHelper_t,
+                      char(__fastcall*)(void*, void*, void*, void*, void*, void*)>);
+        PathingHelper_t       oPathingHelper          = nullptr;
+        void*                 g_pathingHelperTarget   = nullptr;
 
         // sub_3A3E140(rcx=moveController, rdx, r8, r9, stackArg5, stackArg6,
         // stackArg7) - only rcx matters to us; the rest are passed through
@@ -75,6 +334,15 @@ namespace trinity::game
                                              uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7);
         LocoStep_t oLocoStep = nullptr;
         void* g_locoStepTarget = nullptr;
+
+        // Map destination copy (IDB sub_BE3710). r8 points at the game's vec3
+        // destination; the function copies it into the marker manager. We hook
+        // the prologue, read r8, and record the coordinates. The return type is
+        // unknown but the rest of the mod never needs it; char is a safe ABI.
+        using DestinationUpdate_t = char(__fastcall*)(uint64_t rcx, uint64_t rdx,
+                                                      uint64_t r8, uint64_t r9);
+        DestinationUpdate_t oDestinationUpdate = nullptr;
+        void* g_destinationUpdateTarget = nullptr;
 
         // A travel request queued from the menu thread, fired once on the game
         // thread inside hkMoveUpdate (matching how the game itself calls it).
@@ -662,34 +930,21 @@ namespace trinity::game
             __try { *reinterpret_cast<volatile float*>(p) = v; return true; }
             __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
         }
+
+        bool ReadLiveOrigin(float origin[3])
+        {
+            return g_markerOriginAddress && ReadVec3(g_markerOriginAddress, origin) &&
+                   std::isfinite(origin[0]) && std::isfinite(origin[1]) &&
+                   std::isfinite(origin[2]);
+        }
+
         // Live-identified airborne mover (module-relative, IDB imagebase 0).
-        // sub_2F4FA90 drives jump/fall/glide and writes the character's velocity
-        // through our shared driver, so gating Free Flight on "the caller is
-        // inside it" limits altitude control to when the player is genuinely off
-        // the ground - no ground super-jump. The ground mover sub_2F4E780 sits
-        // just below it and is naturally excluded. (Confirmed live 2026-07-21:
-        // standing ret ~2F4F9F9 = ground mover; airborne ret ~2F500AC = here.)
-        // 1.17.00: the mover moved to 0x2FF90A0 (+0xA9610) but is byte-for-byte
-        // the same length, 0x9A4. Identified as the one caller of the
-        // loco-stepper whose function size still matches exactly - of the six
-        // callers, no other is close.
-        //
-        // This is the most fragile thing in the mod: a hardcoded code range,
-        // which every game patch invalidates, and it fails silently because a
-        // return address that lands outside simply reads as "not airborne".
-        // Free Flight was dead on 1.17.00 for exactly that reason. If it goes
-        // quiet again after a patch, re-derive it the same way: find the
-        // stepper by signature, walk its callers, take the 0x9A4-byte one.
-        // 1.18.0: moved again, same 0x9A4 length. Found the same way - the one
-        // caller of the loco-stepper whose size still matches exactly.
-        constexpr uintptr_t kAirMover_Lo = 0x3031FC0;
-        constexpr uintptr_t kAirMover_Hi = 0x3031FC0 + 0x9A4;  // 0x3032964
+        // 1.18.02 (1.0.0.2625): moved to 0x307B030 (+0x49070), size remains 0x9A4.
+        constexpr uintptr_t kAirMover_Lo = 0x307B030;
+        constexpr uintptr_t kAirMover_Hi = 0x307B030 + 0x9A4;  // 0x307B9D4
 
         // True on frames where Free Flight is actively driving the player's
         // vertical velocity (a direction key/button is held while airborne).
-        // There is no hover clamp anymore: releasing simply stops writing and
-        // hands control straight back to the game's physics, so jumps and aerial
-        // attacks are never touched. Published so the HUD can light "FLY".
         std::atomic<bool> g_flightEngaged{false};
 
         // The local player's move-owner (physics proxy), republished every
@@ -831,6 +1086,57 @@ namespace trinity::game
             oLocoStep(comp, dt, vel, a4, a5, a6, a7);
         }
 
+        // Capture the map destination the game is about to copy into the marker
+        // manager. r8 holds a pointer to a vec3 {x,y,z}; read it safely because
+        // we are on the game's movement thread and the pointer comes from game
+        // code, but a stale call would crash the whole session.
+        char __fastcall hkDestinationUpdate(uint64_t rcx, uint64_t rdx, uint64_t r8, uint64_t r9)
+        {
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            float origin[3]{};
+            bool ok = false;
+            __try
+            {
+                const float* p = reinterpret_cast<const float*>(r8);
+                x = p[0];
+                y = p[1];
+                z = p[2];
+                ok = ReadLiveOrigin(origin) &&
+                     std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+            if (ok)
+            {
+                const float oldX = g_destX.load(std::memory_order_relaxed);
+                const float oldY = g_destY.load(std::memory_order_relaxed);
+                const float oldZ = g_destZ.load(std::memory_order_relaxed);
+                g_destSequence.fetch_add(1, std::memory_order_acq_rel); // odd: writer owns snapshot
+                g_destX.store(x, std::memory_order_relaxed);
+                g_destY.store(y, std::memory_order_relaxed);
+                g_destZ.store(z, std::memory_order_relaxed);
+                g_destOriginX.store(origin[0], std::memory_order_relaxed);
+                g_destOriginY.store(origin[1], std::memory_order_relaxed);
+                g_destOriginZ.store(origin[2], std::memory_order_relaxed);
+                g_destSequence.fetch_add(1, std::memory_order_release); // even: snapshot complete
+                g_destValid.store(true, std::memory_order_release);
+
+                // Log when the destination moves, so testing can confirm which
+                // hook point is actually being used by the map.
+                static ULONGLONG s_lastLog = 0;
+                const ULONGLONG now = GetTickCount64();
+                const bool moved = fabsf(x - oldX) > 1.0f || fabsf(y - oldY) > 1.0f || fabsf(z - oldZ) > 1.0f;
+                if (moved && now - s_lastLog > 500)
+                {
+                    s_lastLog = now;
+                    LOG("teleport: destination-update r8=%p  X %.2f Y %.2f Z %.2f  origin %.2f %.2f %.2f",
+                        reinterpret_cast<void*>(r8), x, y, z, origin[0], origin[1], origin[2]);
+                }
+            }
+
+            return oDestinationUpdate(rcx, rdx, r8, r9);
+        }
+
         uint64_t __fastcall hkMoveUpdate(uint64_t moveOwner, uint64_t a2, uint64_t a3, uint64_t a4,
                                           uint64_t a5, uint64_t a6, uint64_t a7)
         {
@@ -857,6 +1163,10 @@ namespace trinity::game
             // Apply Game Speed here too: the fixed-timestep override must be
             // held on the game thread, once per frame, same as the resolve.
             World::Tick();
+
+            // Weather preset override: same reasoning again - the presets are
+            // re-stamped once per frame on the game thread, not the render one.
+            Weather::Tick();
 
             // Slot Size / Max Stack Size table overrides: same reasoning as
             // Game Speed - held/retried on the game thread, not the render one.
@@ -901,13 +1211,136 @@ namespace trinity::game
                 }
             }
 
-            float pos[3];
-            if (ReadVec3(static_cast<uintptr_t>(moveOwner) + kOff_MoveOwner_Position, pos))
+            float pos[3]{};
+            float snapshotOrigin[3]{};
+            const bool havePosition =
+                ReadVec3(owner + kOff_MoveOwner_Position, pos) &&
+                std::isfinite(pos[0]) && std::isfinite(pos[1]) && std::isfinite(pos[2]);
+            const bool haveSnapshotOrigin = ReadLiveOrigin(snapshotOrigin);
+            if (havePosition && haveSnapshotOrigin)
             {
+                g_posSequence.fetch_add(1, std::memory_order_acq_rel); // odd: writer owns snapshot
                 g_posX.store(pos[0], std::memory_order_relaxed);
                 g_posY.store(pos[1], std::memory_order_relaxed);
                 g_posZ.store(pos[2], std::memory_order_relaxed);
-                g_posValid.store(true, std::memory_order_relaxed);
+                g_posOriginX.store(snapshotOrigin[0], std::memory_order_relaxed);
+                g_posOriginY.store(snapshotOrigin[1], std::memory_order_relaxed);
+                g_posOriginZ.store(snapshotOrigin[2], std::memory_order_relaxed);
+                g_posSequence.fetch_add(1, std::memory_order_release); // even: snapshot complete
+                g_posValid.store(true, std::memory_order_release);
+            }
+            else
+            {
+                g_posValid.store(false, std::memory_order_release);
+            }
+
+            // A queued warp lands here, where the movement owner is known good
+            // and the engine is between its own reads. The absolute target is
+            // converted with the live origin on every frame so rebases cannot
+            // move the landing point.
+            ActiveWarp activeWarp{};
+            if (LoadActiveDestinationWarp(&activeWarp) &&
+                g_postHoldSequence.exchange(activeWarp.sequence, std::memory_order_acq_rel) != activeWarp.sequence)
+                g_postHoldLogged.store(false, std::memory_order_release);
+
+            const int frames = g_warpPending.load(std::memory_order_acquire);
+            float origin[3]{};
+            if (havePosition && frames > 0 && ReadLiveOrigin(origin))
+            {
+                const bool toMarker = g_warpToMarker.load(std::memory_order_relaxed);
+                const float worldX = g_warpWorldX.load(std::memory_order_relaxed);
+                const float worldY = g_warpWorldY.load(std::memory_order_relaxed);
+                const float worldZ = g_warpWorldZ.load(std::memory_order_relaxed);
+                const float localX = WorldToLocal(worldX, origin[0]);
+                const float localY = WorldToLocal(worldY, origin[1]) + WarpLandingRise(toMarker);
+                const float localZ = WorldToLocal(worldZ, origin[2]);
+
+                auto* p = reinterpret_cast<float*>(owner + kOff_MoveOwner_Position);
+                bool ok =
+                    RawWriteFloat(p + 0, localX) &&
+                    RawWriteFloat(p + 1, localY) &&
+                    RawWriteFloat(p + 2, localZ);
+
+                // The integrator stores the frame velocity at +0xD0 and
+                // recomputes position from it next tick. Zero both velocity
+                // vectors so the next frame starts from rest.
+                auto* v = reinterpret_cast<float*>(owner + kOff_MoveOwner_Velocity);
+                auto* dv = reinterpret_cast<float*>(owner + kOff_MoveOwner_DesiredVel);
+                ok = ok &&
+                     RawWriteFloat(v + 0, 0.0f) &&
+                     RawWriteFloat(v + 1, 0.0f) &&
+                     RawWriteFloat(v + 2, 0.0f) &&
+                     RawWriteFloat(dv + 0, 0.0f) &&
+                     RawWriteFloat(dv + 1, 0.0f) &&
+                     RawWriteFloat(dv + 2, 0.0f);
+
+                // Destination warps also stamp the pathing servo's vector.
+                if (ok && toMarker)
+                {
+                    auto* mv = reinterpret_cast<float*>(owner + kOff_MoveOwner_MarkerVec);
+                    ok = RawWriteFloat(mv + 0, localX) &&
+                         RawWriteFloat(mv + 1, localY) &&
+                         RawWriteFloat(mv + 2, localZ) &&
+                         RawWriteFloat(mv + 3, 0.0f);
+                }
+
+                if (ok)
+                {
+                    g_warpPending.store(frames - 1, std::memory_order_release);
+                    if (frames == 1 && activeWarp.toMarker &&
+                        g_postHoldSequence.load(std::memory_order_acquire) == activeWarp.sequence &&
+                        g_warpSequence.load(std::memory_order_acquire) == activeWarp.sequence &&
+                        g_warpPending.load(std::memory_order_acquire) == 0 &&
+                        !g_postHoldLogged.exchange(true, std::memory_order_acq_rel))
+                    {
+                        PlayerWorldSnapshot postHold{};
+                        if (LoadPlayerWorldSnapshot(&postHold) &&
+                            g_postHoldSequence.load(std::memory_order_acquire) == activeWarp.sequence &&
+                            g_warpSequence.load(std::memory_order_acquire) == activeWarp.sequence &&
+                            g_warpPending.load(std::memory_order_acquire) == 0)
+                        {
+                            LOG("teleport: post-hold generation %u post-hold position %.2f %.2f %.2f",
+                                activeWarp.sequence,
+                                LocalToWorld(postHold.localX, postHold.originX),
+                                LocalToWorld(postHold.localY, postHold.originY),
+                                LocalToWorld(postHold.localZ, postHold.originZ));
+                        }
+                        uint32_t expectedSequence = activeWarp.sequence;
+                        g_postHoldSequence.compare_exchange_strong(
+                            expectedSequence, 0, std::memory_order_release, std::memory_order_relaxed);
+                    }
+                    if (frames == kWarpHoldFrames)
+                    {
+                        Player::SetWarpGrace(kWarp_GraceMs);
+                        LOG("teleport: warp applied and velocity zeroed (hold %d frames)",
+                            kWarpHoldFrames);
+                    }
+                    if (frames == 1)
+                    {
+                        float finalLocal[3]{};
+                        float finalOrigin[3]{};
+                        if (ReadVec3(owner + kOff_MoveOwner_Position, finalLocal) &&
+                            ReadLiveOrigin(finalOrigin))
+                        {
+                            LOG("teleport: warp complete target-world %.2f %.2f %.2f live-origin %.2f %.2f %.2f observed-local %.2f %.2f %.2f observed-world %.2f %.2f %.2f",
+                                worldX, worldY, worldZ,
+                                finalOrigin[0], finalOrigin[1], finalOrigin[2],
+                                finalLocal[0], finalLocal[1], finalLocal[2],
+                                LocalToWorld(finalLocal[0], finalOrigin[0]),
+                                LocalToWorld(finalLocal[1], finalOrigin[1]),
+                                LocalToWorld(finalLocal[2], finalOrigin[2]));
+                        }
+                        else
+                        {
+                            LOG_WARN("teleport: warp complete target-world %.2f %.2f %.2f; position readback unavailable",
+                                     worldX, worldY, worldZ);
+                        }
+                    }
+                }
+                else if (frames == kWarpHoldFrames)
+                {
+                    LOG_ERR("teleport: warp write failed");
+                }
             }
             return result;
         }
@@ -992,22 +1425,179 @@ namespace trinity::game
             *globalOut = mem::ResolveRipAt(scan.fn + movOff, kLen_MovGlobalInstr);
             return *globalOut != 0;
         }
+
+        struct OriginVotes
+        {
+            size_t hits = 0;
+            std::map<uintptr_t, size_t> votes;
+        };
+
+        bool CollectMarkerOrigin(uintptr_t match, void* ctx)
+        {
+            auto& found = *static_cast<OriginVotes*>(ctx);
+            ++found.hits;
+            const uintptr_t origin = mem::ResolveRipAt(match, 8);
+            if (origin >= kMinPointer)
+                ++found.votes[origin];
+            return false;
+        }
+
+        uintptr_t ResolveMarkerOrigin()
+        {
+            OriginVotes found;
+            mem::FindPatternIf(kSig_MarkerOriginPrefix, &CollectMarkerOrigin, &found);
+            if (found.hits < 3 || found.votes.empty())
+            {
+                LOG_WARN("teleport: marker origin signature count too low (%zu).",
+                         found.hits);
+                return 0;
+            }
+
+            uintptr_t best = 0;
+            size_t bestVotes = 0;
+            for (const auto& [address, votes] : found.votes)
+            {
+                if (votes > bestVotes)
+                {
+                    best = address;
+                    bestVotes = votes;
+                }
+            }
+            return best;
+        }
+
+        // Stamp the warp target into moveOwner+0x90 (position) and +0x1B0
+        // (destination vector) when a destination warp is active.
+        void ApplyWarpStamp(uintptr_t moveOwner)
+        {
+            if (moveOwner < kMinPointer) return;
+            ActiveWarp warp{};
+            if (!LoadActiveDestinationWarp(&warp)) return;
+
+            float origin[3]{};
+            if (!ReadLiveOrigin(origin)) return;
+
+            const float localX = WorldToLocal(warp.worldX, origin[0]);
+            const float localY = WorldToLocal(warp.worldY, origin[1]) +
+                                 WarpLandingRise(warp.toMarker);
+            const float localZ = WorldToLocal(warp.worldZ, origin[2]);
+
+            if (!IsActiveWarp(warp)) return;
+
+            auto* p = reinterpret_cast<float*>(moveOwner + kOff_MoveOwner_Position);
+            if (!RawWriteFloat(p + 0, localX) ||
+                !RawWriteFloat(p + 1, localY) ||
+                !RawWriteFloat(p + 2, localZ)) return;
+
+            auto* mv = reinterpret_cast<float*>(moveOwner + kOff_MoveOwner_MarkerVec);
+            RawWriteFloat(mv + 0, localX);
+            RawWriteFloat(mv + 1, localY);
+            RawWriteFloat(mv + 2, localZ);
+            RawWriteFloat(mv + 3, 0.0f);
+        }
+
+        char __fastcall hkPathingHelper(void* rcx, void* rdx, void* r8, void* r9,
+                                        void* stackArg5, void* stackArg6)
+        {
+            if (g_posValid.load(std::memory_order_acquire) && r9)
+            {
+                uintptr_t moveOwner = 0;
+                if (ReadPtr(reinterpret_cast<uintptr_t>(r9), &moveOwner) && moveOwner >= kMinPointer)
+                    ApplyWarpStamp(moveOwner);
+            }
+
+            ActiveWarp probeWarp{};
+            unsigned probeSample = 0;
+            float query[3]{};
+            float probeOrigin[3]{};
+            bool probeReserved = false;
+            uintptr_t probeMoveOwner = 0;
+            const uintptr_t queryAddress = reinterpret_cast<uintptr_t>(rdx);
+            if (r9 && queryAddress >= kMinPointer &&
+                ReadPtr(reinterpret_cast<uintptr_t>(r9), &probeMoveOwner) && probeMoveOwner >= kMinPointer &&
+                LoadActiveDestinationWarp(&probeWarp) && ReserveGroundProbe(probeWarp, &probeSample))
+            {
+                probeReserved = ReadVec3(queryAddress, query) && ReadLiveOrigin(probeOrigin) &&
+                                std::isfinite(query[0]) && std::isfinite(query[1]) && std::isfinite(query[2]) &&
+                                std::isfinite(probeOrigin[0]) && std::isfinite(probeOrigin[1]) &&
+                                std::isfinite(probeOrigin[2]);
+                if (!probeReserved) ReleaseGroundProbe(probeWarp, probeSample, false);
+            }
+
+            const char result = oPathingHelper(rcx, rdx, r8, r9, stackArg5, stackArg6);
+
+            if (probeReserved)
+            {
+                float nativePosition[3]{};
+                float nativeMarker[3]{};
+                const bool complete =
+                    ReadVec3(probeMoveOwner + kOff_MoveOwner_Position, nativePosition) &&
+                    ReadVec3(probeMoveOwner + kOff_MoveOwner_MarkerVec, nativeMarker) &&
+                    IsActiveWarp(probeWarp) &&
+                    std::isfinite(nativePosition[0]) && std::isfinite(nativePosition[1]) && std::isfinite(nativePosition[2]) &&
+                    std::isfinite(nativeMarker[0]) && std::isfinite(nativeMarker[1]) && std::isfinite(nativeMarker[2]);
+                if (complete)
+                {
+                    LOG("teleport: ground-probe generation %u sample %u result %d absolute-target %.2f %.2f %.2f live-origin %.2f %.2f %.2f query-world %.2f %.2f %.2f native-position-world %.2f %.2f %.2f native-marker-world %.2f %.2f %.2f",
+                        probeWarp.sequence, probeSample, result != 0,
+                        probeWarp.worldX, probeWarp.worldY, probeWarp.worldZ,
+                        probeOrigin[0], probeOrigin[1], probeOrigin[2],
+                        LocalToWorld(query[0], probeOrigin[0]),
+                        LocalToWorld(query[1], probeOrigin[1]),
+                        LocalToWorld(query[2], probeOrigin[2]),
+                        LocalToWorld(nativePosition[0], probeOrigin[0]),
+                        LocalToWorld(nativePosition[1], probeOrigin[1]),
+                        LocalToWorld(nativePosition[2], probeOrigin[2]),
+                        LocalToWorld(nativeMarker[0], probeOrigin[0]),
+                        LocalToWorld(nativeMarker[1], probeOrigin[1]),
+                        LocalToWorld(nativeMarker[2], probeOrigin[2]));
+                }
+                ReleaseGroundProbe(probeWarp, probeSample, complete);
+            }
+
+            if (g_posValid.load(std::memory_order_acquire) && r9)
+            {
+                uintptr_t moveOwner = 0;
+                if (ReadPtr(reinterpret_cast<uintptr_t>(r9), &moveOwner) && moveOwner >= kMinPointer)
+                    ApplyWarpStamp(moveOwner);
+            }
+
+            return result;
+        }
     }
 
     bool Teleport::Install()
     {
+        g_markerOriginAddress = ResolveMarkerOrigin();
+        if (g_markerOriginAddress)
+            LOG("teleport: marker world-origin resolved @ %p.",
+                reinterpret_cast<void*>(g_markerOriginAddress));
+        else
+            LOG_WARN("teleport: marker world-origin unavailable - Teleport to Destination, Saved Locations, and coordinate warps disabled.");
+
         if (!mem::InstallHook("teleport: movement-update", kSig_MoveUpdate, "position tracking disabled",
                               &hkMoveUpdate, &oMoveUpdate, &g_moveUpdateTarget))
             return false;
 
+        // Capture map-marker / quest-destination updates. Non-fatal: the rest of
+        // teleport works without it; "Teleport to Destination" simply stays grey.
+        if (mem::InstallHook("teleport: destination-update", kSig_DestinationUpdate, "Teleport to Destination disabled",
+                             &hkDestinationUpdate, &oDestinationUpdate, &g_destinationUpdateTarget))
+        {
+            LOG("teleport: destination-update hook installed @ %p.", g_destinationUpdateTarget);
+        }
+
         // Resolve the fast-travel trigger + the destination registry global.
         // Non-fatal if missing: position tracking still works, the fast-travel
         // menu just stays empty (logged).
-        if (const uintptr_t travel = mem::FindPattern(kSig_TravelToNode))
+        const uintptr_t travel = mem::FindPattern(kSig_TravelToNode);
+        if (travel && mem::CountMatches(kSig_TravelToNode, 2) == 1)
         {
-            if (mem::CountMatches(kSig_TravelToNode, 2) != 1)
-                LOG_WARN("teleport: fast-travel signature ambiguous; using first match.");
             g_travelFn = reinterpret_cast<TravelFn>(travel);
+        }
+        else if (travel)
+        {
+            LOG_ERR("teleport: fast-travel signature ambiguous - fast-travel menu disabled.");
         }
         else
         {
@@ -1026,23 +1616,457 @@ namespace trinity::game
         mem::InstallHook("teleport: locomotion-stepper", kSig_LocoStepper, "Super Run disabled",
                          &hkLocoStep, &oLocoStep, &g_locoStepTarget);
 
+        // Hook the pathing helper so destination warps can override the servo
+        // instead of fighting it. Non-fatal.
+        if (mem::InstallHook("teleport: pathing-helper", kSig_PathingHelper,
+                             "destination warp may fight the servo",
+                             &hkPathingHelper, &oPathingHelper, &g_pathingHelperTarget))
+        {
+            LOG("teleport: pathing helper hook installed @ %p.", g_pathingHelperTarget);
+        }
+
         return true;
     }
 
     void Teleport::Remove()
     {
+        mem::RemoveHook(&g_pathingHelperTarget);
+        mem::RemoveHook(&g_destinationUpdateTarget);
         mem::RemoveHook(&g_locoStepTarget);
         mem::RemoveHook(&g_moveUpdateTarget);
         g_posValid.store(false, std::memory_order_relaxed);
+        g_destValid.store(false, std::memory_order_relaxed);
+        g_markerOriginAddress = 0;
     }
 
-    bool Teleport::GetLastPosition(float* x, float* y, float* z)
+    // --- Warp to coordinates -------------------------------------------------
+    // The write has to happen on the game thread, in the same movement tick
+    // that reads the position - the menu runs on the render thread and the
+    // movement owner is only known to be live inside that hook. So the menu
+    // queues a request and the tick consumes it, the same pattern Add Item
+    // uses for engine calls.
+
+    bool Teleport::WarpTo(float x, float y, float z)
     {
-        if (!g_posValid.load(std::memory_order_relaxed)) return false;
-        *x = g_posX.load(std::memory_order_relaxed);
-        *y = g_posY.load(std::memory_order_relaxed);
-        *z = g_posZ.load(std::memory_order_relaxed);
+        PlayerWorldSnapshot player{};
+        if (!LoadPlayerWorldSnapshot(&player)) return false;
+        return QueueWorldWarp(LocalToWorld(x, player.originX),
+                              LocalToWorld(y, player.originY),
+                              LocalToWorld(z, player.originZ), false);
+    }
+
+    bool Teleport::WarpToDestination()
+    {
+        DestinationSnapshot dest{};
+        PlayerWorldSnapshot player{};
+        if (!LoadDestinationSnapshot(&dest) || !LoadPlayerWorldSnapshot(&player)) return false;
+
+        const float worldY = dest.y == 0.0f
+            ? LocalToWorld(player.localY, player.originY)
+            : dest.y;
+        LOG("teleport: destination world %.2f, %.2f, %.2f",
+            dest.x, worldY, dest.z);
+        return QueueWorldWarp(dest.x, worldY, dest.z, true);
+    }
+
+    bool Teleport::GetLastPosition(float* x, float* y, float* z,
+                                   float* originX, float* originY, float* originZ)
+    {
+        PlayerWorldSnapshot player{};
+        if (!LoadPlayerWorldSnapshot(&player)) return false;
+        *x = player.localX;
+        *y = player.localY;
+        *z = player.localZ;
+        if (originX) *originX = player.originX;
+        if (originY) *originY = player.originY;
+        if (originZ) *originZ = player.originZ;
         return true;
+    }
+
+    bool Teleport::GetDestinationPosition(float* x, float* y, float* z)
+    {
+        DestinationSnapshot dest{};
+        if (!LoadDestinationSnapshot(&dest)) return false;
+        *x = dest.x;
+        *y = dest.y;
+        *z = dest.z;
+        return true;
+    }
+
+    // --- Saved locations -----------------------------------------------------
+    // Coordinates the player chose to keep, with a name. Held here rather than
+    // in settings.cpp because this is the module that owns positions, and the
+    // list has to be readable from the render thread while the movement tick
+    // keeps updating the live position beside it.
+    //
+    // Bookmarks last only for the current game session.
+    namespace
+    {
+        constexpr size_t kMaxBookmarks = 64;
+
+        struct Bookmark
+        {
+            char  name[48] = {};
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+        };
+
+        std::mutex            g_bmMutex;
+        std::vector<Bookmark> g_bookmarks;
+    }
+
+    size_t Teleport::BookmarkCount()
+    {
+        std::lock_guard<std::mutex> lk(g_bmMutex);
+        return g_bookmarks.size();
+    }
+
+    bool Teleport::GetBookmark(size_t i, char* nameOut, size_t nameCap,
+                               float* x, float* y, float* z)
+    {
+        std::lock_guard<std::mutex> lk(g_bmMutex);
+        if (i >= g_bookmarks.size()) return false;
+        const Bookmark& b = g_bookmarks[i];
+        // Copied out, not handed back as a pointer: the list can be rewritten
+        // between two frames of the menu.
+        if (nameOut && nameCap) snprintf(nameOut, nameCap, "%s", b.name);
+        if (x) *x = b.x;
+        if (y) *y = b.y;
+        if (z) *z = b.z;
+        return true;
+    }
+
+    bool Teleport::AddBookmarkHere(const char* name)
+    {
+        PlayerWorldSnapshot player{};
+        if (!LoadPlayerWorldSnapshot(&player)) return false;
+
+        std::lock_guard<std::mutex> lk(g_bmMutex);
+        if (g_bookmarks.size() >= kMaxBookmarks) return false;
+        Bookmark b{};
+        if (name && name[0]) snprintf(b.name, sizeof(b.name), "%s", name);
+        else                 snprintf(b.name, sizeof(b.name), "Location %zu", g_bookmarks.size() + 1);
+        b.x = CaptureWorldCoordinate(player.localX, player.originX);
+        b.y = CaptureWorldCoordinate(player.localY, player.originY);
+        b.z = CaptureWorldCoordinate(player.localZ, player.originZ);
+        g_bookmarks.push_back(b);
+        return true;
+    }
+
+    bool Teleport::RenameBookmark(size_t i, const char* name)
+    {
+        if (!name || !name[0]) return false;
+        std::lock_guard<std::mutex> lk(g_bmMutex);
+        if (i >= g_bookmarks.size()) return false;
+        snprintf(g_bookmarks[i].name, sizeof(g_bookmarks[i].name), "%s", name);
+        return true;
+    }
+
+    bool Teleport::DeleteBookmark(size_t i)
+    {
+        std::lock_guard<std::mutex> lk(g_bmMutex);
+        if (i >= g_bookmarks.size()) return false;
+        g_bookmarks.erase(g_bookmarks.begin() + static_cast<ptrdiff_t>(i));
+        return true;
+    }
+
+    bool Teleport::WarpToBookmark(size_t i)
+    {
+        float x = 0, y = 0, z = 0;
+        if (!GetBookmark(i, nullptr, 0, &x, &y, &z)) return false;
+        PlayerWorldSnapshot player{};
+        if (!LoadPlayerWorldSnapshot(&player)) return false;
+        return QueueWorldWarp(x, y, z, false);
+    }
+    // --- Map-marker search ---------------------------------------------------
+    // Finding the marker by reading code failed: the published functions turned
+    // out to be ones Trinity already owns. So this asks the game instead, using
+    // the one thing that makes a memory search tractable - knowing the answer
+    // in advance.
+    //
+    // A saved location gives an exact X, Y and Z. Put a map marker on that same
+    // spot and somewhere in memory those floats now live. Step 1 records every
+    // address where they do. Move the marker to a SECOND saved location and
+    // step 2 keeps only the addresses that followed it. Step 3 does the same
+    // against a third point (usually your live position) to narrow further.
+    //
+    // Two independent constraints already separate this from the currency hunt,
+    // which had one immovable value. A third constraint removes almost all
+    // remaining aliases.
+    namespace
+    {
+        // The first attempt capped at 4096 and filled that quota inside the
+        // first few spans, so it stopped scanning long before it reached most
+        // of the heap - and then reported "0 survivors" as though it had looked
+        // everywhere. A truncated search that cannot say it was truncated is
+        // worse than no search, so the cap is now high enough to be reached
+        // only by a genuine fault, and reaching it is logged as a failure.
+        constexpr size_t kMarkerMaxCandidates = 400000;
+        // Tight, because the reference point is now a fast-travel waypoint the
+        // map snaps to rather than a spot clicked by eye. The slack that is
+        // left covers the small offset between where a waypoint sits and where
+        // fast travel actually puts you down.
+        static float     g_markerTolerance    = 2.0f;
+        // X/Z pairs: vec3 X..Z (+8), vec2 X/Z (+4), or a padded record (+12).
+        constexpr uintptr_t kMarkerZGap[]     = { 8, 4, 12 };
+        // X/Y/Z vec3: Y at +4, Z at +8.
+        constexpr uintptr_t kMarkerYZGap[]    = { 4, 8 };
+
+        std::vector<uintptr_t> g_markerCands;
+        bool g_markerUseY = false;
+
+        template <typename Fn>
+        void ForEachHeapSpan(Fn fn, bool includeImage)
+        {
+            SYSTEM_INFO si{};
+            GetSystemInfo(&si);
+            auto addr = reinterpret_cast<uintptr_t>(si.lpMinimumApplicationAddress);
+            const auto end = reinterpret_cast<uintptr_t>(si.lpMaximumApplicationAddress);
+            MEMORY_BASIC_INFORMATION mbi{};
+            while (addr < end && VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)) == sizeof(mbi))
+            {
+                const auto base = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+                const uintptr_t size = mbi.RegionSize;
+                if (size == 0) break;
+
+                const bool readable =
+                    !(mbi.Protect & PAGE_GUARD) &&
+                    (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                                    PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY));
+                if (!readable || mbi.State != MEM_COMMIT) { addr = base + size; continue; }
+
+                // Marker state is heap state, so private pages are the primary
+                // search space. Mapped pages are included only as a fallback,
+                // mostly for completeness - a static pointer to the marker could
+                // live there, but the editable coordinates themselves will not.
+                if (mbi.Type == MEM_PRIVATE || includeImage)
+                    fn(base, size, includeImage);
+
+                addr = base + size;
+            }
+        }
+    }
+
+    namespace
+    {
+        // POD-only, so the SEH frame is legal: __try cannot live in a function
+        // that owns anything needing unwinding, and the caller owns a vector.
+        size_t ScanSpanForPair(uintptr_t base, uintptr_t size, float x, float z,
+                               uintptr_t* out, size_t cap)
+        {
+            size_t n = 0;
+            __try
+            {
+                const auto* p = reinterpret_cast<const uint8_t*>(base);
+                for (uintptr_t off = 0; off + 16 <= size && n < cap; off += 4)
+                {
+                    float fx;
+                    std::memcpy(&fx, p + off, 4);
+                    if (fabsf(fx - x) > g_markerTolerance) continue;
+                    for (uintptr_t gap : kMarkerZGap)
+                    {
+                        if (off + gap + 4 > size) continue;
+                        float fz;
+                        std::memcpy(&fz, p + off + gap, 4);
+                        if (fabsf(fz - z) > g_markerTolerance) continue;
+                        out[n++] = base + off;
+                        break;
+                    }
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) { }
+            return n;
+        }
+
+        size_t ScanSpanForTriplet(uintptr_t base, uintptr_t size, float x, float y, float z,
+                                  uintptr_t* out, size_t cap)
+        {
+            size_t n = 0;
+            __try
+            {
+                const auto* p = reinterpret_cast<const uint8_t*>(base);
+                for (uintptr_t off = 0; off + 12 <= size && n < cap; off += 4)
+                {
+                    float fx;
+                    std::memcpy(&fx, p + off, 4);
+                    if (fabsf(fx - x) > g_markerTolerance) continue;
+                    float fy;
+                    std::memcpy(&fy, p + off + kMarkerYZGap[0], 4);
+                    if (fabsf(fy - y) > g_markerTolerance) continue;
+                    float fz;
+                    std::memcpy(&fz, p + off + kMarkerYZGap[1], 4);
+                    if (fabsf(fz - z) > g_markerTolerance) continue;
+                    out[n++] = base + off;
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) { }
+            return n;
+        }
+
+        bool StillMatches(uintptr_t a, float x, float z)
+        {
+            bool ok = false;
+            __try
+            {
+                const auto* p = reinterpret_cast<const uint8_t*>(a);
+                float fx;
+                std::memcpy(&fx, p, 4);
+                if (fabsf(fx - x) <= g_markerTolerance)
+                {
+                    for (uintptr_t gap : kMarkerZGap)
+                    {
+                        float fz;
+                        std::memcpy(&fz, p + gap, 4);
+                        if (fabsf(fz - z) <= g_markerTolerance) { ok = true; break; }
+                    }
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+            return ok;
+        }
+
+        bool StillMatchesTriplet(uintptr_t a, float x, float y, float z)
+        {
+            bool ok = false;
+            __try
+            {
+                const auto* p = reinterpret_cast<const uint8_t*>(a);
+                float fx, fy, fz;
+                std::memcpy(&fx, p, 4);
+                std::memcpy(&fy, p + kMarkerYZGap[0], 4);
+                std::memcpy(&fz, p + kMarkerYZGap[1], 4);
+                ok = fabsf(fx - x) <= g_markerTolerance &&
+                     fabsf(fy - y) <= g_markerTolerance &&
+                     fabsf(fz - z) <= g_markerTolerance;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+            return ok;
+        }
+
+        bool ReadQuad(uintptr_t a, float* v4)
+        {
+            bool ok = true;
+            __try { std::memcpy(v4, reinterpret_cast<const void*>(a), sizeof(float) * 4); }
+            __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+            return ok;
+        }
+    }
+
+    int Teleport::MarkerSearchStep1(float x, float y, float z, bool useY)
+    {
+        g_markerCands.clear();
+        g_markerCands.reserve(1 << 16);
+        g_markerUseY = useY;
+
+        static uintptr_t batch[4096];
+        size_t spans = 0, bytes = 0;
+        bool   truncated = false;
+        bool   usedImage = false;
+
+        auto collect = [&](uintptr_t base, uintptr_t size, bool /*image*/)
+        {
+            if (g_markerCands.size() >= kMarkerMaxCandidates) { truncated = true; return; }
+            ++spans;
+            bytes += size;
+            const size_t got = useY
+                ? ScanSpanForTriplet(base, size, x, y, z, batch, sizeof(batch) / sizeof(batch[0]))
+                : ScanSpanForPair(base, size, x, z, batch, sizeof(batch) / sizeof(batch[0]));
+            for (size_t i = 0; i < got && g_markerCands.size() < kMarkerMaxCandidates; ++i)
+                g_markerCands.push_back(batch[i]);
+        };
+
+        ForEachHeapSpan(collect, false);
+        if (g_markerCands.empty())
+        {
+            LOG_WARN("marker/search: private heap scan found nothing; trying mapped pages "
+                     "as a last-resort fallback.");
+            usedImage = true;
+            ForEachHeapSpan(collect, true);
+        }
+
+        LOG("marker/search: step 1 (%s, tol=%.2f) walked %zu span(s), %llu MB, and recorded %zu "
+            "candidate(s) near X %.1f Y %.1f Z %.1f.",
+            useY ? "X/Y/Z" : "X/Z", g_markerTolerance, spans, (unsigned long long)(bytes >> 20),
+            g_markerCands.size(), x, y, z);
+        if (usedImage)
+            LOG_WARN("marker/search: step 1 fell back to mapped pages - results are "
+                     "probably not the editable marker state.");
+        if (truncated || g_markerCands.size() >= kMarkerMaxCandidates)
+        {
+            LOG_WARN("marker/search: step 1 hit its own limit - the scan stopped "
+                     "early and later steps would be meaningless. Widen the gap "
+                     "between reference points and try again.");
+        }
+        for (size_t i = 0; i < g_markerCands.size() && i < 12; ++i)
+        {
+            float v[4] = {};
+            if (!ReadQuad(g_markerCands[i], v)) continue;
+            LOG("marker/search:   @%p  %.2f  %.2f  %.2f  %.2f",
+                reinterpret_cast<void*>(g_markerCands[i]), v[0], v[1], v[2], v[3]);
+        }
+        return static_cast<int>(g_markerCands.size());
+    }
+
+    int Teleport::MarkerSearchStep2(float x, float y, float z, bool useY)
+    {
+        if (g_markerCands.empty())
+        {
+            LOG_WARN("marker/search: step 2 has nothing to filter - run step 1 first.");
+            return 0;
+        }
+
+        std::vector<uintptr_t> kept;
+        for (uintptr_t a : g_markerCands)
+        {
+            bool ok = useY ? StillMatchesTriplet(a, x, y, z) : StillMatches(a, x, z);
+            if (ok) kept.push_back(a);
+        }
+        g_markerCands.swap(kept);
+
+        LOG("marker/search: step 2 left %zu candidate(s) that followed the marker.",
+            g_markerCands.size());
+        for (size_t i = 0; i < g_markerCands.size() && i < 12; ++i)
+        {
+            float v[4] = {};
+            if (!ReadQuad(g_markerCands[i], v)) continue;
+            LOG("marker/search:   @%p  %.2f  %.2f  %.2f  %.2f",
+                reinterpret_cast<void*>(g_markerCands[i]), v[0], v[1], v[2], v[3]);
+        }
+        return static_cast<int>(g_markerCands.size());
+    }
+
+    int Teleport::MarkerSearchStep3(float x, float y, float z, bool useY)
+    {
+        if (g_markerCands.empty())
+        {
+            LOG_WARN("marker/search: step 3 has nothing to filter - run step 1 and 2 first.");
+            return 0;
+        }
+
+        std::vector<uintptr_t> kept;
+        for (uintptr_t a : g_markerCands)
+        {
+            bool ok = useY ? StillMatchesTriplet(a, x, y, z) : StillMatches(a, x, z);
+            if (ok) kept.push_back(a);
+        }
+        g_markerCands.swap(kept);
+
+        LOG("marker/search: step 3 left %zu candidate(s) after the third point.",
+            g_markerCands.size());
+        for (size_t i = 0; i < g_markerCands.size() && i < 12; ++i)
+        {
+            float v[4] = {};
+            if (!ReadQuad(g_markerCands[i], v)) continue;
+            LOG("marker/search:   @%p  %.2f  %.2f  %.2f  %.2f",
+                reinterpret_cast<void*>(g_markerCands[i]), v[0], v[1], v[2], v[3]);
+        }
+        return static_cast<int>(g_markerCands.size());
+    }
+
+    void Teleport::SetMarkerTolerance(float units)
+    {
+        if (units < 0.5f) units = 0.5f;
+        if (units > 100.0f) units = 100.0f;
+        g_markerTolerance = units;
     }
 
     bool Teleport::GetFlightEngaged()

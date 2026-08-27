@@ -14,6 +14,7 @@
 #include "../game/equipment.h"
 #include "../game/friendly.h"
 #include "../game/parry.h"
+#include "../game/weather.h"
 
 namespace trinity
 {
@@ -47,6 +48,12 @@ namespace trinity
             return;
         }
 
+        // Weather is not installed. weather.cpp works - it captures every
+        // preset the world loads and re-stamps them - but the sky is not drawn
+        // from that data, so the feature has no visible effect and its menu rows
+        // were removed. Installing the hook anyway would cost a scan, capture
+        // 77 structs and write log lines for a feature nobody can use. The code
+        // and its research stay; only the call goes.
         // Gameplay features. Non-fatal: if a signature ever fails to resolve
         // the overlay still runs, the feature is just disabled and logged.
         game::Player::Install();    // God Mode / Infinite Stamina
@@ -57,6 +64,10 @@ namespace trinity
         game::Equipment::Install(); // Abyss-gear socket editor
         game::Friendly::Install();  // Trust Multiplier (gift/feed/tame)
         game::Parry::Install();     // Easy Parry (locates the site; patches nothing yet)
+        if (State::Get().easyParry)
+            game::Parry::SetEnabled(true);
+        if (State::Get().noBounty)
+            game::Inventory::SetNoBounty(true);
 
         m_initialized = true;
         LOG_OK("Ready - INSERT (or LB + DOWN on controller) toggles the menu in-game.");

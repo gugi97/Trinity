@@ -72,6 +72,23 @@ namespace trinity::mem
             return out;
         }
 
+        // Committed and readable - the broad test, used for the fallback pass
+        // and for the layout diagnostic.
+        //
+        // The narrow test is IsExecutableAndReadable below. Every pattern in
+        // this project describes INSTRUCTIONS, so a match
+        // found in a data section is a false positive by construction - and a
+        // costly one, because CountMatches uses the count to decide whether a
+        // signature still identifies the function it was derived from. Scanning
+        // the whole image (SizeOfImage) meant short patterns picked up
+        // coincidental byte runs in data and were then reported as ambiguous,
+        // which cost two real features: patterns that are provably unique among
+        // the game's code were rejected at load. Restricting the scan to
+        // executable pages makes the uniqueness check mean what it says, and
+        // makes it faster - the data sections here are far larger than the code.
+        //
+        // PAGE_EXECUTE alone is still excluded: executable but not readable,
+        // so we cannot compare bytes there.
         bool IsReadable(DWORD protect)
         {
             if (protect & PAGE_GUARD) return false;
@@ -81,10 +98,27 @@ namespace trinity::mem
             return (protect & readable) != 0;
         }
 
+        // Readable AND executable - the default the scan uses.
+        //
+        // Every pattern in this project describes INSTRUCTIONS, so a match in a
+        // data section is a false positive by construction, and a costly one:
+        // CountMatches uses the count to decide whether a signature still
+        // identifies the function it was derived from. Scanning the whole image
+        // meant short patterns collected coincidental byte runs out of data and
+        // were then rejected as ambiguous - which is exactly what disabled two
+        // map-marker trace points that are provably unique among the code.
+        bool IsExecutableAndReadable(DWORD protect)
+        {
+            if (!IsReadable(protect)) return false;
+            const DWORD exec = PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+            return (protect & exec) != 0;
+        }
+
         // Merged, contiguous, committed+readable spans within the module image.
         // Merging adjacent regions lets a pattern straddle a page-protection
         // boundary (e.g. across two .text sub-ranges) without being missed.
-        std::vector<std::pair<uintptr_t, uintptr_t>> ReadableSpans(const ModuleRegion& mod)
+        std::vector<std::pair<uintptr_t, uintptr_t>> ReadableSpans(const ModuleRegion& mod,
+                                                                   bool execOnly = true)
         {
             std::vector<std::pair<uintptr_t, uintptr_t>> spans;
             const uintptr_t end = mod.base + mod.size;
@@ -97,7 +131,9 @@ namespace trinity::mem
                 uintptr_t regEnd = regBase + mbi.RegionSize;
                 if (regEnd > end) regEnd = end;
 
-                if (mbi.State == MEM_COMMIT && IsReadable(mbi.Protect))
+                const bool want = execOnly ? IsExecutableAndReadable(mbi.Protect)
+                                           : IsReadable(mbi.Protect);
+                if (mbi.State == MEM_COMMIT && want)
                 {
                     if (!spans.empty() && spans.back().second == regBase)
                         spans.back().second = regEnd;         // merge contiguous
@@ -138,7 +174,8 @@ namespace trinity::mem
             }
         }
 
-        std::vector<uintptr_t> Scan(std::string_view pattern, const ModuleRegion& mod, size_t maxResults)
+        std::vector<uintptr_t> Scan(std::string_view pattern, const ModuleRegion& mod,
+                                    size_t maxResults, bool allowDataFallback = true)
         {
             std::vector<uintptr_t> results;
             if (!mod) return results;
@@ -152,11 +189,30 @@ namespace trinity::mem
             const bool    haveAnchor = firstFixed < patLen;
             const uint8_t anchor     = haveAnchor ? pat.bytes[firstFixed] : 0;
 
-            for (const auto& [begin, end] : ReadableSpans(mod))
+            for (const auto& [begin, end] : ReadableSpans(mod, /*execOnly=*/true))
             {
                 ScanSpan(begin, end, pat, firstFixed, anchor, haveAnchor, results, maxResults);
                 if (results.size() >= maxResults) break;
             }
+            if (!results.empty() || !allowDataFallback) return results;
+
+            // Nothing among the executable pages. This game ships packed, so a
+            // region can legitimately still be PAGE_READWRITE at the moment we
+            // scan - unpacked, but not yet reprotected - and an executable-only
+            // walk would silently lose every signature inside it. Falling back
+            // keeps the previous behaviour reachable; saying so out loud keeps
+            // it from becoming an invisible second code path, and this line is
+            // the first thing to look for when a pattern that always resolved
+            // suddenly does not.
+            for (const auto& [begin, end] : ReadableSpans(mod, /*execOnly=*/false))
+            {
+                ScanSpan(begin, end, pat, firstFixed, anchor, haveAnchor, results, maxResults);
+                if (results.size() >= maxResults) break;
+            }
+            if (!results.empty())
+                LOG_WARN("scanner: a pattern matched only OUTSIDE executable pages - that "
+                         "region is probably not reprotected yet. The match is kept, but "
+                         "treat any uniqueness check on it with suspicion.");
             return results;
         }
     }
@@ -196,7 +252,11 @@ namespace trinity::mem
         const bool    haveAnchor = firstFixed < patLen;
         const uint8_t anchor     = haveAnchor ? pat.bytes[firstFixed] : 0;
 
-        for (const auto& [begin, end] : ReadableSpans(mod))
+        // Executable pages only, and deliberately without Scan's readable-page
+        // fallback: this function exists to answer "does the pattern still
+        // identify one function", and counting matches out of data is exactly
+        // the thing that made that answer wrong.
+        for (const auto& [begin, end] : ReadableSpans(mod, /*execOnly=*/true))
         {
             if (end < begin || (end - begin) < patLen) continue;
             const auto* const start = reinterpret_cast<const uint8_t*>(begin);
@@ -219,7 +279,22 @@ namespace trinity::mem
 
     size_t CountMatches(std::string_view pattern, const ModuleRegion& mod, size_t maxCount)
     {
-        return Scan(pattern, mod, maxCount).size();
+        // Same two-pass rule as Scan, and the fallback matters here more than
+        // it looks.
+        //
+        // Refusing the fallback seemed right - counting data coincidences is
+        // what made short patterns look ambiguous. But this game is packed, and
+        // the higher code regions are not marked executable when Install()
+        // runs: two 96-byte patterns that are provably unique in the image came
+        // back as ZERO matches and their features were skipped. Zero is a worse
+        // answer than one, because a pattern that exists is reported as absent.
+        //
+        // The two-pass shape keeps both properties. When the executable pass
+        // finds anything, only those matches are counted, so data can never
+        // pollute a real count. Only when code has nowhere executable to be
+        // found does the readable pass run - and that is exactly the packed
+        // case this exists for.
+        return Scan(pattern, mod, maxCount, /*allowDataFallback=*/true).size();
     }
 
     void LogModuleLayout()

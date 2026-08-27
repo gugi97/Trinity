@@ -174,6 +174,10 @@ namespace trinity::game
         struct BulkAdd { int total; int added; int failed; bool active; };
         static BulkAdd BulkAddStatus();
 
+        // 1-Click shortcuts for Camp Resources and Currencies
+        static bool AddCampResources(int64_t qty = 99999);
+        static bool AddCurrencies(int64_t copperQty = 1000000, int64_t goldQty = 1000, int64_t pearlQty = 1000, int64_t pouchQty = 100);
+
         // --- The catalog: every item the game defines -------------------------
         // Unlike the snapshot above (what you are carrying, rebuilt constantly),
         // this is the item TABLE - static data that cannot change while the game
@@ -189,6 +193,25 @@ namespace trinity::game
         // thousands of rows, plenty of them internal/unused, and an
         // "Item #4213" row is noise. `qty` in the ItemInfo is always 0 here - a
         // catalog entry is a definition, not a stack.
+        // --- Lost & Sold ------------------------------------------------
+        // A buyback bin: everything that has left the inventory since the mod
+        // started watching (sold, destroyed, dismantled, used), newest first,
+        // persisted to Trinity_LostItems.txt next to Trinity.asi so it survives
+        // a restart. Built by diffing quantities rather than by hooking a sell
+        // function - see the implementation for why, and for what that costs.
+        static int  LostCount();
+        // Name is copied into the caller's buffer, not handed back as a
+        // pointer: the game thread can rewrite the list between frames.
+        static bool GetLost(int idx, uint16_t* typeId, int64_t* qty,
+                            char* nameOut, size_t nameCap);
+        // Queues one row through the normal Add Item path; the row is only
+        // dropped once the add is accepted. False = the add queue was busy.
+        static bool RestoreLost(int idx);
+        // Queues every row through the bulk-add path, so progress reads out of
+        // BulkAddStatus() exactly like Add All does.
+        static bool RestoreAllLost();
+        static void ForgetLost(int idx);
+        static void ClearLost();
         static int         CatalogCategoryCount();
         static const char* CatalogCategoryName(int cat);
         static const char* CatalogCategoryTab(int cat);
@@ -198,6 +221,25 @@ namespace trinity::game
 
         // True once the catalog has been built and holds something (it is built
         // on the first call to any of the above, which walks the whole table).
+        // Find an item by its engine key ("Silver_Pack"), not its display name -
+        // keys survive a language change and a patch; names do not.
+        static bool TypeIdForKey(const char* key, uint16_t* out);
+        // True when this catalog category is one of the game's quest / lore /
+        // recipe groups - bounty notices, documents, quest memories, relics.
+        // Judged from the group's own name, so a group added by a future patch
+        // is picked up without a code change.
+        static bool        IsSpecialCategory(int cat);
+        // CatalogCategoryName with the internal "ETC " prefix dropped.
+        static const char* CatalogCategoryPlainName(int cat);
+        // --- Durability ---------------------------------------------------
+        // The item type's maximum endurance, or false when the item has none
+        // (the game marks that with 0xFFFF - see offsets.h).
+        static bool MaxEnduranceForType(uint16_t typeId, uint16_t* out);
+        // Raw ItemInfo row address - diagnostics only.
+        static bool ItemDefAddr(uint16_t typeId, uintptr_t* out);
+        // Sets every carried item's endurance to its own maximum. Returns how
+        // many were actually below it; items without durability are untouched.
+        static int  RepairAllCarried();
         static bool CatalogReady();
 
         // True once the server-authority holder is known. Normally true within

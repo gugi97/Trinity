@@ -1,4 +1,4 @@
-﻿#include "dx12_hook.h"
+#include "dx12_hook.h"
 
 #include <Windows.h>
 #include <d3d12.h>
@@ -42,7 +42,7 @@ namespace trinity::hooks
     // swapchain Streamline pushes finished frames through (its buffers are
     // read-only to us => DXGI_ERROR_ACCESS_DENIED, device removed).
     //
-    // The proven approach (OptiScaler / ReShade): WRAP, don't detour. We return a
+    // The proven approach used by other DX12 overlays: WRAP, don't detour. We return a
     // WrappedIDXGISwapChain to the game that forwards every method to the real
     // (Streamline-proxy) swapchain but intercepts Present/Present1 to draw the
     // overlay first. The wrapper is handed out by a VirtualProtect vtable-slot
@@ -1248,7 +1248,7 @@ namespace trinity::hooks
     {
         if (!pp || !*pp) return;
 
-        // Skip tiny probe/overlay swapchains (matches OptiScaler) - never wrap our
+        // Skip tiny probe/overlay swapchains - never wrap our
         // own or a capability-probe surface.
         DXGI_SWAP_CHAIN_DESC1 d1 = {};
         if (SUCCEEDED((*pp)->GetDesc1(&d1)) && (d1.Width < 100 || d1.Height < 100))

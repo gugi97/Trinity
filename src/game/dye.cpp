@@ -1,5 +1,7 @@
 #include "dye.h"
 
+#include <string_view>
+
 #include <Windows.h>
 #include <atomic>
 #include <cstdio>
@@ -272,41 +274,34 @@ namespace trinity::game
                 return false;
             }
 
-            // Overwrite the matching record in the server copy's dye vector, in
-            // place, byte for byte - the same direct write that makes socket
-            // edits persist. No game call, no allocation, so it does not depend
-            // on the upsert signature (which has not resolved since 1.17.00).
+            // Two ways to make a channel durable, and which one applies depends
+            // on whether the server copy already has a record for it.
             //
-            // A channel the server copy has no record for cannot be added this
-            // way (the vector would have to grow), so it is left visual-only -
-            // the same partial outcome the feature had before, but now the
-            // common case (re-dyeing existing channels) actually sticks.
-            uintptr_t data = 0;
+            // EXISTING record: overwrite the three RGB bytes in place. No engine
+            // call, no allocation - the same minimal write that makes socket edits
+            // stick, and the one that does not hang the game.
+            //
+            // MISSING record (or no vector at all): ask the engine to create one
+            // via the dye upsert. This path did nothing until now because the
+            // upsert signature had not resolved since 1.17.00, so the code gave
+            // up and left the colour visual-only - which is exactly what a
+            // freshly spawned item hit, since it carries no dye records at all.
+            // The 1.18.02 encoding is resolved now, so the growth case works.
+            uintptr_t data  = 0;
             uint32_t  count = 0;
-            if (!ReadPtr(entry + kOff_ItemVal_DyeData, &data) || data < kMinPointer)
-            {
-                LOG_WARN("dye: server copy has no dye vector for slot tag %u - "
-                         "dyed visually but will not survive a reload.", tag);
-                return false;
-            }
-            if (!Read32(entry + kOff_ItemVal_DyeCount, &count) || count == 0 ||
-                count > kDye_MaxChannels)
-            {
-                LOG_WARN("dye: server copy carries no dye records for slot tag %u - "
-                         "dyed visually but will not survive a reload.", tag);
-                return false;
-            }
+            const bool haveVector =
+                ReadPtr(entry + kOff_ItemVal_DyeData, &data) && data >= kMinPointer &&
+                Read32(entry + kOff_ItemVal_DyeCount, &count) && count > 0 &&
+                count <= kDye_MaxChannels;
+            if (!haveVector) { data = 0; count = 0; }
 
-            // Write ONLY the three RGB bytes (record +7/+8/+9) into the matching
-            // server record, leaving the group key, material, channel and the
-            // engine bookkeeping bytes exactly as the game left them. Replacing
-            // the whole record is what hung the game; this is the minimal write
-            // the reference table uses, and it does not.
-            int wanted = 0, written = 0;
+            int wanted = 0, written = 0, created = 0;
             for (int ch = 0; ch < static_cast<int>(kDye_MaxChannels); ++ch)
             {
                 if (!(mask & (1u << ch))) continue;
                 ++wanted;
+
+                bool done = false;
                 for (uint32_t i = 0; i < count; ++i)
                 {
                     uint8_t rc = 0;
@@ -319,14 +314,21 @@ namespace trinity::game
                     if (!ok) g_dyeMirrorDead = true;  // a bad write kills the path for the session
                     uint8_t back = 0;
                     if (ok && Read8(a + 7, &back) && back == recs[ch][7]) ++written;
+                    done = true;
                     break;
                 }
+                if (done) continue;
+
+                // Nothing to overwrite - grow the vector through the engine.
+                if (g_dyeUpsert && CallDyeUpsert(entry, recs[ch])) { ++created; ++written; }
             }
 
-            if (written < wanted)
-                LOG("dye: slot tag %u - %d/%d channel(s) made durable "
-                    "(the rest are new channels the save copy cannot grow to hold).",
-                    tag, written, wanted);
+            if (created)
+                LOG("dye: slot tag %u - %d/%d channel(s) durable (%d newly created).",
+                    tag, written, wanted, created);
+            else if (written < wanted)
+                LOG_WARN("dye: slot tag %u - only %d/%d channel(s) made durable; the "
+                         "engine refused to create the rest.", tag, written, wanted);
             return written > 0;
         }
 
@@ -562,17 +564,34 @@ namespace trinity::game
     bool Dye::Install()
     {
         const uintptr_t apply = mem::FindPattern(kSig_DyeApplyBatch);
-        if (!apply)
+        if (!apply || mem::CountMatches(kSig_DyeApplyBatch, 2) != 1)
         {
-            LOG_ERR("dye: apply-batch signature NOT FOUND - armor dyeing disabled.");
+            LOG_ERR("dye: apply-batch signature %s - armor dyeing disabled.",
+                    apply ? "ambiguous" : "NOT FOUND");
             return false;
         }
         g_dyeApply = reinterpret_cast<DyeApplyBatch_t>(apply);
 
-        const uintptr_t upsert = mem::FindPattern(kSig_DyeUpsert);
+        // Current build's encoding first, the older one as a fallback - the two
+        // are the same function compiled with different displacement forms, so
+        // one pattern can never cover both.
+        size_t which = 0;
+        const std::string_view upsertSigs[] = { kSig_DyeUpsert_1180, kSig_DyeUpsert };
+        const uintptr_t upsert = mem::FindPatternAny(upsertSigs, 2, mem::GameModule(), &which);
         if (!upsert)
-            LOG("dye: persisting via direct RGB write (channels with an existing record survive a reload).");
-        g_dyeUpsert = reinterpret_cast<DyeUpsert_t>(upsert);
+            LOG_WARN("dye: upsert signature NOT FOUND - falling back to a direct RGB write, so "
+                     "channels without an existing record will not survive a reload.");
+        else if (mem::CountMatches(upsertSigs[which], 2) != 1)
+        {
+            LOG_WARN("dye: upsert signature ambiguous - falling back to a direct RGB write.");
+            g_dyeUpsert = nullptr;
+        }
+        else
+        {
+            LOG("dye: durable upsert @ %p (pattern #%zu).",
+                reinterpret_cast<void*>(upsert), which);
+            g_dyeUpsert = reinterpret_cast<DyeUpsert_t>(upsert);
+        }
 
         if (!mem::InstallHook("dye: equip-batch", kSig_EquipBatch,
                               "armor dyeing disabled (no component capture)",

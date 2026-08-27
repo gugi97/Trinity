@@ -40,9 +40,12 @@ namespace trinity
         bool rebindCapture = false;
 
         // Player stat features (player.cpp).
-        bool godMode    = false;
-        bool infStamina = false;
-        bool infSpirit  = false;
+        bool godMode         = false;
+        bool infStamina      = false;
+        bool infSpirit       = false;
+        bool infMountStamina = false;
+        bool immuneFire      = false;
+        bool immuneCold      = false;
 
         // Battle-damage multipliers (player.cpp). Applied to the signed HP
         // delta at the damage-apply dispatcher; 1.0 = game behavior.
@@ -50,7 +53,7 @@ namespace trinity
         // being a separate mechanism: it just overrides the multiplier with one
         // large enough that any survivable hit is not. Kept as its own flag so
         // the slider is not silently rewritten behind the player's back.
-        // Menu language, stored as a code ("en", "id", "zh") rather than an
+        // Menu language, stored as a code ("en", "id", "zh", "ru") rather than an
         // index: the list is built from whatever files are installed, so an
         // index would point at a different language the moment one is added.
         char  language[8] = "en";
@@ -132,6 +135,22 @@ namespace trinity
         int  invSlotSizeVal  = 2000;
         bool invStackSize    = false;
         int  invStackSizeVal = 999999;
+
+        // Weather (weather.cpp). Re-stamps a handful of fields across every
+        // weather preset the game has loaded, so the sky blend lands on the
+        // chosen look regardless of which presets are being mixed. Preset data
+        // is rebuilt from the paks every load, so this cannot reach a save.
+        // weatherPreset indexes Weather::SkyNames(); weatherIntensity scales
+        // how far the preset pushes (1.0 = as strong as the game's own
+        // heaviest authored weather).
+        bool  weatherOverride  = false;
+        int   weatherPreset    = 0;     // 0 = Clear
+        float weatherIntensity = 1.0f;
+
+        // Shows a large preview of the highlighted item beside the menu.
+        // On by default: the row icons are too small to choose gear by, which
+        // is the whole reason people spawn a hundred items to compare them.
+        bool  itemPreview = true;
 
         // Overlay extras.
         bool showFps = false;

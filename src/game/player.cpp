@@ -107,9 +107,12 @@ namespace trinity::game
         constexpr int kMaxPlayers      = 8;                    // 3 protagonists + transients/margin
         constexpr int kMaxGaugePerType = 3;                    // stamina/spirit gauges per body
         constexpr int kMaxStatEntries  = kMaxPlayers * kMaxGaugePerType;
+        constexpr int kMaxMountStamEntries = 3;                // one live mount has one gauge
+        constexpr uintptr_t kMountVtableOffset_TU20000 = 0x527C518;
 
         std::atomic<uintptr_t> g_hpEntries[kMaxPlayers]{};
         std::atomic<uintptr_t> g_stamEntries[kMaxStatEntries]{};
+        std::atomic<uintptr_t> g_mountStamEntries[kMaxMountStamEntries]{};
         std::atomic<uintptr_t> g_spiritEntries[kMaxStatEntries]{};
         // Battle-damage identities, one per tracked player. A player's actor is
         // the attacker side of an outgoing hit; its vital/target owner (the
@@ -269,6 +272,25 @@ namespace trinity::game
                 g_stamEntries[i].store(0, std::memory_order_release);
                 g_spiritEntries[i].store(0, std::memory_order_release);
             }
+            for (int i = 0; i < kMaxMountStamEntries; ++i)
+                g_mountStamEntries[i].store(0, std::memory_order_release);
+        }
+
+        // Warp grace: a short window of invulnerability after a teleport.
+        //
+        // Writing a position straight into the movement owner can drop the
+        // player inside terrain or a long way above it, and the fall that
+        // follows can kill before control returns. The game has no "safe
+        // landing" of its own, so the mod buys a few seconds instead.
+        //
+        // Deliberately time-based rather than "until grounded": there is no
+        // reliable grounded flag here, and a timer cannot get stuck on.
+        std::atomic<unsigned long long> g_warpGraceUntil{ 0 };
+
+        bool WarpGraceActive()
+        {
+            const unsigned long long until = g_warpGraceUntil.load(std::memory_order_relaxed);
+            return until != 0 && GetTickCount64() < until;
         }
 
         // The resolve exists solely to feed the stat pins (God Mode / Infinite
@@ -281,7 +303,11 @@ namespace trinity::game
             // noFallDamage belongs here too: without the walk the tracked-player
             // set is empty, ScaleDamage never recognises the victim, and the
             // toggle would silently do nothing.
-            return st.godMode || st.infStamina || st.infSpirit || st.noFallDamage ||
+            // Warp grace needs the same character walk the toggles need, or
+            // g_targetOwners stays empty and the protection never recognises us.
+            if (WarpGraceActive()) return true;
+            return st.godMode || st.infStamina || st.infMountStamina || st.infSpirit || st.noFallDamage ||
+                   st.immuneFire || st.immuneCold ||
                    st.oneHitKill ||
                    st.dmgInMult != 1.0f || st.dmgOutMult != 1.0f;
         }
@@ -320,7 +346,7 @@ namespace trinity::game
 
             // (B) Track every active instance of that class: same vtable AND a
             // resolvable vital chain (skips the pool's empty slots).
-            int nPlayers = 0, nStam = 0, nSpir = 0;
+            int nPlayers = 0, nStam = 0, nMountStam = 0, nSpir = 0;
             for (uint32_t i = 0; i < count && nPlayers < kMaxPlayers; ++i)
             {
                 uint64_t ch = 0;
@@ -367,17 +393,14 @@ namespace trinity::game
                 }
             }
 
-            // --- Mount-stamina survey (READ ONLY) ---------------------------
-            // Which non-player characters carry a stamina gauge, and what do
-            // they call themselves? Logged once per distinct class so mounting
-            // a horse produces exactly one line, and only while the survey is
-            // still incomplete - it costs nothing after that.
+            // The mounted horse is a separate live character. The verified
+            // class is exact for TU 2.00.00, so no NPC stamina can be pinned.
+            if (State::Get().infStamina || State::Get().infMountStamina)
             {
-                constexpr int kMaxSurveyed = 6;
-                static uint64_t s_seenVt[kMaxSurveyed]{};
-                static int      s_seen = 0;
+                const mem::ModuleRegion& mod = mem::GameModule();
+                const uintptr_t mountVt = mod.base + kMountVtableOffset_TU20000;
 
-                for (uint32_t i = 0; i < count && s_seen < kMaxSurveyed; ++i)
+                for (uint32_t i = 0; i < count && nMountStam < kMaxMountStamEntries; ++i)
                 {
                     uint64_t ch = 0;
                     if (!Read64(static_cast<uintptr_t>(data) + 8ull * i, &ch) || ch < kMinPointer)
@@ -385,45 +408,20 @@ namespace trinity::game
                     const uintptr_t owner = static_cast<uintptr_t>(ch);
                     uint64_t vt = 0;
                     if (!Read64(owner, &vt) || vt < kMinPointer) continue;
-                    if (vt == anchorVt) continue;                 // that is a protagonist
-
-                    bool already = false;
-                    for (int k = 0; k < s_seen; ++k)
-                        if (s_seenVt[k] == vt) { already = true; break; }
-                    if (already) continue;
+                    if (vt != mountVt) continue;
 
                     SelfChain mc;
-                    if (!WalkSelfChain(owner, &mc)) continue;     // no vital chain
+                    if (!WalkSelfChain(owner, &mc)) continue;
 
-                    // Collect this character's gauge types.
-                    int  stamCount = 0;
-                    char types[128] = "";
-                    int  w = 0;
                     for (int k = 0; k < kStatArray_ScanEntries; ++k)
                     {
                         const uintptr_t e = mc.statArray + k * kSizeof_StatEntry;
                         int32_t stt = 0;
                         if (!StatEntryType(e, &stt)) break;
                         if (!PlausibleStatType(stt)) break;
-                        if (IsStaminaType(stt)) ++stamCount;
-                        if (w < static_cast<int>(sizeof(types)) - 8)
-                            w += snprintf(types + w, sizeof(types) - w, "%d ", stt);
+                        if (IsStaminaType(stt) && nMountStam < kMaxMountStamEntries)
+                            g_mountStamEntries[nMountStam++].store(e, std::memory_order_release);
                     }
-                    if (stamCount == 0) continue;                 // only care about stamina owners
-
-                    uint32_t objTypeRaw = 0xFFFFFFFFu;
-                    Read32(owner + kOff_Owner_ObjectType, &objTypeRaw);
-                    const int32_t objType = static_cast<int32_t>(objTypeRaw);
-
-                    s_seenVt[s_seen++] = vt;
-
-                    // Logged once per distinct class. That is deliberately all
-                    // it does: whether this is a mount or an NPC is settled by
-                    // WHEN the line appears - dismounted versus mounted - not by
-                    // anything readable from the object. ObjectType reads as a
-                    // packed 0x10002 here and cannot decide it.
-                    LOG("player/mount-survey: objType=%d vtable=%llX stamina-gauges=%d types=[%s]",
-                        objType, static_cast<unsigned long long>(vt), stamCount, types);
                 }
             }
 
@@ -436,6 +434,7 @@ namespace trinity::game
                 g_targetOwners[i].store(0, std::memory_order_release);
             }
             for (int i = nStam; i < kMaxStatEntries; ++i) g_stamEntries[i].store(0, std::memory_order_release);
+            for (int i = nMountStam; i < kMaxMountStamEntries; ++i) g_mountStamEntries[i].store(0, std::memory_order_release);
             for (int i = nSpir; i < kMaxStatEntries; ++i) g_spiritEntries[i].store(0, std::memory_order_release);
         }
 
@@ -463,7 +462,9 @@ namespace trinity::game
 
             const State& st = State::Get();
             if (st.godMode    && InSet(g_hpEntries,     kMaxPlayers,     e)) PinEntry(e);
-            if (st.infStamina && InSet(g_stamEntries,   kMaxStatEntries, e)) PinEntry(e);
+            if ((st.infStamina || st.infMountStamina) &&
+                (InSet(g_stamEntries, kMaxStatEntries, e) ||
+                 InSet(g_mountStamEntries, kMaxMountStamEntries, e))) PinEntry(e);
             if (st.infSpirit  && InSet(g_spiritEntries, kMaxStatEntries, e)) PinEntry(e);
 
             return result;
@@ -488,6 +489,20 @@ namespace trinity::game
             float mult = 1.0f;
             if (InSet(g_targetOwners, kMaxPlayers, targetOwner))
             {
+                // Landing protection comes first and beats every multiplier:
+                // the point is that a teleport can never be what kills you.
+                if (WarpGraceActive()) return 0;
+
+                // Fire & Heat immunity
+                if (st.immuneFire && (statusId == 17 || statusId == 18 || statusId == 48))
+                    return 0;
+
+                // Cold & Frost immunity
+                if (st.immuneCold && (statusId == 19 || statusId == 24))
+                    return 0;
+            }
+            if (InSet(g_targetOwners, kMaxPlayers, targetOwner))
+            {
                 // A fall has nobody behind it. Every ordinary hit - weapon, arrow,
                 // claw - arrives with a source actor, so "no attacker" is the
                 // discriminator this dispatcher actually offers; the comment above
@@ -500,26 +515,10 @@ namespace trinity::game
                         Read64(sourceCtx + kOff_Owner_Actor, &src);
                     const bool hasAttacker = srcReadable && src >= kMinPointer;
 
-                    // Report EVERY hit the player takes while this is on, not
-                    // just the ones blocked. The first attempt blocked only
-                    // "damage with no attacker" and nothing was ever logged,
-                    // which means falls are not arriving the way that assumed -
-                    // and no amount of reasoning from here settles which way
-                    // they DO arrive. So describe each hit and let a real fall
-                    // say what it looks like.
-                    // The field log settled it: a fall arrives WITH a source
-                    // actor, so "no attacker" was the wrong discriminator and
-                    // the block never ran. What a fall actually is, is damage
-                    // you inflict on yourself - the attacker is one of the
-                    // tracked player actors, and the victim is a player too.
-                    // An enemy hit never satisfies both.
                     const bool selfInflicted =
                         hasAttacker &&
                         InSet(g_actors, kMaxPlayers, static_cast<uintptr_t>(src));
 
-                    // Confirmed in the field: falls report self=1 and are
-                    // blocked, enemy hits report self=0 and pass. Two lines are
-                    // enough to show the test is live without filling the log.
                     static int s_seen = 0;
                     if (s_seen < 2)
                     {
@@ -562,7 +561,7 @@ namespace trinity::game
         {
             // Only HP loss is damage; heals, regen and every other status ride
             // this dispatcher too and must pass through unchanged.
-            if (delta < 0 && statusId == StatType_Health)
+            if (delta < 0 && (statusId == StatType_Health || statusId == 17 || statusId == 18 || statusId == 19 || statusId == 24 || statusId == 48))
                 delta = ScaleDamage(reinterpret_cast<uintptr_t>(targetOwner), sourceCtx, delta,
                                     statusId);
 
@@ -599,6 +598,11 @@ namespace trinity::game
         return true;
     }
 
+    void Player::SetWarpGrace(unsigned ms)
+    {
+        g_warpGraceUntil.store(GetTickCount64() + ms, std::memory_order_relaxed);
+    }
+
     void Player::RefreshSelf()
     {
         // Skip the per-frame character-list walk when nothing consumes its
@@ -616,6 +620,36 @@ namespace trinity::game
         s_wasActive = true;
 
         TickResolveSelf();
+
+        if (st.godMode)
+        {
+            for (int i = 0; i < kMaxPlayers; ++i)
+            {
+                const uintptr_t e = g_hpEntries[i].load(std::memory_order_relaxed);
+                if (e >= kMinPointer) PinEntry(e);
+            }
+        }
+        if (st.infStamina || st.infMountStamina)
+        {
+            for (int i = 0; i < kMaxStatEntries; ++i)
+            {
+                const uintptr_t e = g_stamEntries[i].load(std::memory_order_relaxed);
+                if (e >= kMinPointer) PinEntry(e);
+            }
+            for (int i = 0; i < kMaxMountStamEntries; ++i)
+            {
+                const uintptr_t e = g_mountStamEntries[i].load(std::memory_order_relaxed);
+                if (e >= kMinPointer) PinEntry(e);
+            }
+        }
+        if (st.infSpirit)
+        {
+            for (int i = 0; i < kMaxStatEntries; ++i)
+            {
+                const uintptr_t e = g_spiritEntries[i].load(std::memory_order_relaxed);
+                if (e >= kMinPointer) PinEntry(e);
+            }
+        }
     }
 
     void Player::Remove()
@@ -633,6 +667,8 @@ namespace trinity::game
             g_stamEntries[i].store(0);
             g_spiritEntries[i].store(0);
         }
+        for (int i = 0; i < kMaxMountStamEntries; ++i)
+            g_mountStamEntries[i].store(0);
     }
 
     bool Player::Ready()

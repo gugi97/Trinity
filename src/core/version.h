@@ -1,10 +1,15 @@
-﻿#pragma once
+#pragma once
 
+
+// Development-only research tooling. Release builds leave this at 0.
+#ifndef TRINITY_MARKER_RESEARCH
+#define TRINITY_MARKER_RESEARCH 0
+#endif
 // Single source of truth for the mod version.
 // Keep the numeric components in sync with the string below; the Windows
 // VERSIONINFO resource (Trinity.rc) builds FILEVERSION/PRODUCTVERSION from them.
 #define TRINITY_VERSION_MAJOR 0
-#define TRINITY_VERSION_MINOR 21
-#define TRINITY_VERSION_PATCH 10
+#define TRINITY_VERSION_MINOR 17
+#define TRINITY_VERSION_PATCH 0
 
-#define TRINITY_VERSION "0.21.10"
+#define TRINITY_VERSION "0.17.0"

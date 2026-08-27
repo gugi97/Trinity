@@ -13,6 +13,11 @@ namespace trinity::ui
     // A plain action row (Enter / A / click fires it).
     bool Option(const char* label, const char* desc = nullptr);
 
+    // Option that also reports Del / X pressed on it, so a list can offer
+    // both an action and a removal without a second row per entry. The
+    // caller decides whether to confirm - this only says the key was hit.
+    bool OptionRemovable(const char* label, const char* desc, bool* outRemove);
+
     // Option with the game's own icon at the left, lazily loaded from `icon` -
     // the sprite name the game itself stores for the item or category (see
     // icons.h). The icon box is reserved even when there is no icon, keeping
@@ -86,7 +91,10 @@ namespace trinity::ui
     // State::textCapture); Enter / Esc or moving off the row stops it.
     // Backspace edits, Del / X clears the whole filter. Returns true when
     // the buffer changed this frame.
-    bool Search(char* buf, size_t cap, const char* desc = nullptr);
+    // `label` overrides the row caption for uses that are not a filter -
+    // naming a saved location, for one. Defaults to "Search".
+    bool Search(char* buf, size_t cap, const char* desc = nullptr,
+                const char* label = nullptr);
 
     // --- Inventory item row ---------------------------------------------------
     // One item with its quantity edited IN PLACE - browsing and editing are the
