@@ -136,10 +136,18 @@ namespace trinity::ui
         auto mergeCjk = [&](float size)
         {
             if (!i18n::NeedsCjkGlyphs()) return;
-            static const char* kCjk[] = { "msyh.ttc", "msyh.ttf", "simsun.ttc",
-                                          "meiryo.ttc", "malgun.ttf", nullptr };
+
+            // Hangul is not covered by the Chinese fonts that usually come first
+            // in the fallback list, so prefer a Korean face when it is needed.
+            static const char* kCjk[]         = { "msyh.ttc", "msyh.ttf", "simsun.ttc",
+                                                  "meiryo.ttc", "malgun.ttf", nullptr };
+            static const char* kKoreanFirst[] = { "malgun.ttf", "malgunbd.ttf",
+                                                  "msyh.ttc", "msyh.ttf", "simsun.ttc",
+                                                  "meiryo.ttc", nullptr };
+            const char* const* faces = i18n::NeedsKoreanGlyphs() ? kKoreanFirst : kCjk;
+
             char path[MAX_PATH];
-            for (const char* const* n = kCjk; *n; ++n)
+            for (const char* const* n = faces; *n; ++n)
             {
                 snprintf(path, sizeof(path), "%s\\Fonts\\%s", windir, *n);
                 const DWORD attr = GetFileAttributesA(path);

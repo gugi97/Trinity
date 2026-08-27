@@ -1,6 +1,7 @@
 #include "inventory.h"
 
 #include <Windows.h>
+#include <intrin.h>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -81,6 +82,16 @@ namespace trinity::game
         void*          g_insTarget   = nullptr;
         void*          g_commitTarget = nullptr;
         void*          g_expandTarget = nullptr;
+
+        // --- Theft suppression probe -----------------------------------------
+        // The game broadcasts theft/pickpocket crimes through sub_141F7A6B0.
+        // It is also called from many non-theft paths (donations, NPC interaction),
+        // so a global block crashes the game. We hook it only to collect evidence:
+        // the return address tells us whether a hit came from
+        // ClientStealItemInteractionProcessor::execute (0x141DF2728) or elsewhere.
+        using TheftCrimeReport_t = void*(__fastcall*)(void*, void*, void*, void*, void*);
+        TheftCrimeReport_t oTheftCrimeReport = nullptr;
+        void*              g_theftTarget     = nullptr;
 
         std::atomic<uintptr_t> g_holder{0};
         std::atomic<ULONGLONG> g_holderTick{0};
@@ -1107,6 +1118,23 @@ namespace trinity::game
             return oSetExpandSlots(holder, outErr, a3, type, count);
         }
 
+        // --- Diagnostic probe for theft report boundary -----------------------
+        // Count and log the first few hits, including the return address. The
+        // goal is to prove that only hits coming from
+        // ClientStealItemInteractionProcessor::execute (return address 0x141DF2728)
+        // correspond to player theft; every other caller must keep working.
+        void* __fastcall hkTheftCrimeReport(void* a1, void* a2, void* a3, void* a4, void* a5)
+        {
+            static std::atomic<int> s_hits{0};
+            const int hit = ++s_hits;
+            if (hit <= 10)
+            {
+                LOG("theft: TheftCrimeReport hit #%d from %p (a2=%p).",
+                    hit, _ReturnAddress(), a2);
+            }
+            return oTheftCrimeReport(a1, a2, a3, a4, a5);
+        }
+
         // --- Used-count repair ------------------------------------------------
         // bucket+0x12 ("slots in use") is an INCREMENTAL accumulator the engine
         // maintains as ceil(quantity/stackMax) deltas inside its own add/remove
@@ -1340,6 +1368,12 @@ namespace trinity::game
                          "server holder relies on the commit hook alone",
                          &hkHolderInsert, &oHolderInsert, &g_insTarget, 4);
 
+        // Diagnostic hook: prove the theft report boundary. Optional - the rest
+        // of inventory still works if the signature drifts; we just lose data.
+        mem::InstallHook("inventory: theft crime report", kSig_TheftCrimeReport,
+                         "theft suppression probe disabled",
+                         &hkTheftCrimeReport, &oTheftCrimeReport, &g_theftTarget, 4);
+
         // Durable container walk (optional but preferred - without it the
         // list only appears once the game happens to query an item count,
         // which is hit-or-miss at load).
@@ -1410,8 +1444,8 @@ namespace trinity::game
         mem::RemoveHook(&g_qtyTarget);
         mem::RemoveHook(&g_insTarget);
         mem::RemoveHook(&g_commitTarget);
-        mem::RemoveHook(&g_expandTarget); // after the restore above, which
-                                          // still calls its trampoline
+        mem::RemoveHook(&g_expandTarget); // after the restore above, which                                          // still calls its trampoline
+        mem::RemoveHook(&g_theftTarget);
         g_holder.store(0);
         g_serverHolder.store(0);
         g_serverContainer.store(0);
