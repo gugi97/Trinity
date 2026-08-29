@@ -939,10 +939,63 @@ namespace trinity::game
                    std::isfinite(origin[2]);
         }
 
-        // Live-identified airborne mover (module-relative, IDB imagebase 0).
-        // 1.18.02 (1.0.0.2625): moved to 0x307B030 (+0x49070), size remains 0x9A4.
-        constexpr uintptr_t kAirMover_Lo = 0x307B030;
-        constexpr uintptr_t kAirMover_Hi = 0x307B030 + 0x9A4;  // 0x307B9D4
+        // The airborne mover, as ABSOLUTE addresses, resolved at load by
+        // ResolveAirMover() below. 0 until then, and 0 forever if the signature
+        // does not match - which leaves Free Flight inert rather than acting on
+        // a range that belongs to some other function.
+        uintptr_t g_airMoverLo = 0;
+        uintptr_t g_airMoverHi = 0;
+
+        // Find the air mover and measure it, without trusting any number from a
+        // previous game build.
+        //
+        // The signature lands somewhere in the middle of the function, so the
+        // bounds come from the int3 padding MSVC puts between functions: walk
+        // back to the first CC CC pair for the start, forward for the end. Both
+        // walks are capped - if a build ever stops padding, we would rather give
+        // up and disable the feature than hand the range test a garbage window
+        // that swallows unrelated callers.
+        bool ResolveAirMover()
+        {
+            const uintptr_t hit = mem::FindPattern(kSig_AirMoverStep);
+            if (!hit) return false;
+
+            const mem::ModuleRegion& mod = mem::GameModule();
+            if (!mod || hit < mod.base || hit >= mod.base + mod.size) return false;
+
+            constexpr uintptr_t kWalkCap = 0x4000; // no real function is this big
+            uintptr_t lo = 0, hi = 0;
+            __try
+            {
+                const auto* p = reinterpret_cast<const uint8_t*>(hit);
+                for (uintptr_t i = 2; i < kWalkCap && hit - i >= mod.base; ++i)
+                {
+                    if (p[-static_cast<ptrdiff_t>(i)] == 0xCC &&
+                        p[-static_cast<ptrdiff_t>(i) + 1] == 0xCC)
+                    {
+                        lo = hit - i + 2;
+                        break;
+                    }
+                }
+                for (uintptr_t i = 0; i < kWalkCap && hit + i + 1 < mod.base + mod.size; ++i)
+                {
+                    if (p[i] == 0xCC && p[i + 1] == 0xCC)
+                    {
+                        hi = hit + i;
+                        break;
+                    }
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+
+            if (!lo || !hi || hi <= lo) return false;
+            g_airMoverLo = lo;
+            g_airMoverHi = hi;
+            return true;
+        }
 
         // True on frames where Free Flight is actively driving the player's
         // vertical velocity (a direction key/button is held while airborne).
@@ -1036,11 +1089,8 @@ namespace trinity::game
             bool inAirMover = false;
             if (isPlayer)
             {
-                static const uintptr_t base =
-                    reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-                const uintptr_t off =
-                    reinterpret_cast<uintptr_t>(_ReturnAddress()) - base;
-                inAirMover = off >= kAirMover_Lo && off < kAirMover_Hi;
+                const uintptr_t ret = reinterpret_cast<uintptr_t>(_ReturnAddress());
+                inAirMover = g_airMoverLo && ret >= g_airMoverLo && ret < g_airMoverHi;
             }
 
             if (st.superRun && st.superRunMult != 1.0f && vel)
@@ -1606,6 +1656,16 @@ namespace trinity::game
         // everything else still works without it).
         mem::InstallHook("teleport: locomotion-stepper", kSig_LocoStepper, "Super Run disabled",
                          &hkLocoStep, &oLocoStep, &g_locoStepTarget);
+
+        // Free Flight rides the same hook but additionally needs to know which
+        // caller means "airborne". Super Run does not, so a failure here is
+        // scoped to Free Flight alone.
+        if (ResolveAirMover())
+            LOG("teleport: airborne mover @ %p..%p - Free Flight ready.",
+                reinterpret_cast<void*>(g_airMoverLo), reinterpret_cast<void*>(g_airMoverHi));
+        else
+            LOG_ERR("teleport: airborne mover NOT FOUND - Free Flight disabled "
+                    "(Super Run and Super Jump are unaffected).");
 
         // Hook the pathing helper so destination warps can override the servo
         // instead of fighting it. Non-fatal.

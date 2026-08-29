@@ -388,6 +388,27 @@ namespace trinity::game
     inline constexpr const char* kSig_LocoStepper =
         "48 8B C4 48 89 58 10 44 88 48 20 55 56 57 41 54 41 55 41 56 41 57 "
         "48 8D A8 68 F8 FF FF 48 81 EC 60 08 00 00";
+    // The AIRBORNE mover - the caller Free Flight identifies by return
+    // address. The loco stepper above is a shared helper: the ground mover and
+    // the air mover both call it, and nothing on the component separates a
+    // glide from a jump (see the long note at hkLocoStep). So the CALLER is the
+    // mode, and Free Flight only acts when the stepper was entered from this
+    // function.
+    //
+    // This used to be a baked module offset (0x307B030 on TU 2.00.00), which is
+    // exactly the kind of thing a patch moves: TU 2.00.01 shifted it to
+    // 0x307BAB0 and Free Flight went quietly dead - the hook still installed,
+    // the range test just never came true again. So it is a signature now like
+    // everything else, and teleport.cpp derives the function bounds around the
+    // match at load rather than trusting a number from a previous build.
+    //
+    // The pattern is one of the air mover's own calls INTO the stepper
+    // (zeroed r9, a stack out-pointer, the drive vector in xmm1, `this` in rbx).
+    // It matches twice, both inside this one function - the stack displacement
+    // is wildcarded because the two call sites differ only there - so any match
+    // lands in the right place.
+    inline constexpr const char* kSig_AirMoverStep =
+        "45 33 C9 4C 8D 45 ?? C5 FA 10 0E 48 8B CB E8 ?? ?? ?? ??";
 
     // --- Fast travel / map-gimmick teleport --------------------------------
     // The world map fast-travels through sub_505140(ignored, sceneId, nodeIndex)
