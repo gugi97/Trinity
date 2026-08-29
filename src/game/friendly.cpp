@@ -56,7 +56,37 @@ namespace trinity::game
         int      g_seeded   = 0; // passed through to establish a baseline
         int      g_scaled   = 0; // multiplied
         int      g_reverted = 0; // came back LOWER than what we had written
+        int      g_passed   = 0; // seen before, and we changed nothing
         uint64_t g_lastRec  = 0; // GetTickCount64() of the most recent record
+
+        // Per-record detail, for when the summary is not enough.
+        //
+        // The counters above cannot tell "this record never arrived" from
+        // "it arrived and we decided not to touch it" - a repeat that neither
+        // scales nor reverts increments nothing and is invisible. That is
+        // exactly the state a "Trust Multiplier does nothing" report leaves you
+        // in, so g_passed now counts it and, while the feature is switched ON,
+        // the first few records get a full line: which map, which relationship,
+        // what value came in, and what we did about it.
+        //
+        // Hard-capped for the process lifetime rather than throttled, because
+        // the failure this diagnoses shows up in the first handful of records
+        // or not at all - and a cap cannot degenerate into the per-NPC spam
+        // that made up most of the log before.
+        constexpr int kDetailBudget = 60;
+        int           g_detailLeft  = kDetailBudget;
+
+        // Call with g_cacheMx held.
+        void Detail(const char* what, uint32_t mapId, uint16_t group, uint32_t key,
+                    int64_t oldVal, int64_t newVal)
+        {
+            if (g_detailLeft <= 0) return;
+            --g_detailLeft;
+            LOG("friendly/detail: %s map=%s group=%u key=%u %lld -> %lld%s",
+                what, mapId ? "pet" : "npc", group, key,
+                static_cast<long long>(oldVal), static_cast<long long>(newVal),
+                (g_detailLeft == 0) ? " (detail budget spent; summaries only from here)" : "");
+        }
 
         int64_t ScaleGain(int64_t oldVal, int64_t newVal, float mult)
         {
@@ -137,6 +167,7 @@ namespace trinity::game
                     // second - an actual gift or greet - the thing that scales,
                     // which is what the design intended all along.
                     ++g_seeded;
+                    Detail("seed  ", mapId, group, key, 0, newVal);
                     g_lastVal[ckLive] = newVal;
                     return;
                 }
@@ -153,9 +184,23 @@ namespace trinity::game
                 if (s != newVal && Write64(r + kOff_FriendlyRec_Value, s))
                 {
                     ++g_scaled;
-                    g_lastVal[ckLive] = s;
+                    Detail("SCALED", mapId, group, key, oldVal, s);
                     return;
                 }
+                // A gain we recognised but did not change: either the
+                // multiplier worked out to the same number, or the write was
+                // refused. Worth a line - it is a different failure from never
+                // seeing the gain at all.
+                Detail("nowrite", mapId, group, key, oldVal, newVal);
+            }
+            else if (on)
+            {
+                // The feature is on and this relationship is already known, yet
+                // there is nothing to scale. This is the line that says WHY:
+                // the value did not go up (a resync or an idle re-push), or the
+                // relationship is already at the cap.
+                Detail(oldVal >= kFriendly_Max ? "at-max " : "no-gain",
+                       mapId, group, key, oldVal, newVal);
             }
 
             // Falling through with a value BELOW what we last allowed means
@@ -166,7 +211,7 @@ namespace trinity::game
             // move for a reload, so the value is let through either way. It is
             // counted because a session full of reverts is the signature of the
             // second case, and that is the thing worth seeing in the log.
-            if (newVal < oldVal) ++g_reverted;
+            if (newVal < oldVal) ++g_reverted; else ++g_passed;
             g_lastVal[ckLive] = newVal;
         }
 
@@ -203,7 +248,7 @@ namespace trinity::game
         mem::RemoveHook(&g_petTarget);
         std::lock_guard<std::mutex> lk(g_cacheMx);
         g_lastVal.clear();
-        g_seeded = g_scaled = g_reverted = 0;
+        g_seeded = g_scaled = g_reverted = g_passed = 0;
         g_lastRec = 0;
     }
 
@@ -214,19 +259,20 @@ namespace trinity::game
         const uint64_t last = g_lastRec;
         if (!last || GetTickCount64() - last < kFriendlyBurst_QuietMs) return;
 
-        int seeded = 0, scaled = 0, reverted = 0;
+        int seeded = 0, scaled = 0, reverted = 0, passed = 0;
         {
             std::lock_guard<std::mutex> lk(g_cacheMx);
             if (!g_lastRec || GetTickCount64() - g_lastRec < kFriendlyBurst_QuietMs) return;
             seeded   = g_seeded;
             scaled   = g_scaled;
             reverted = g_reverted;
-            g_seeded = g_scaled = g_reverted = 0;
+            passed   = g_passed;
+            g_seeded = g_scaled = g_reverted = g_passed = 0;
             g_lastRec = 0;
         }
-        if (seeded || scaled || reverted)
-            LOG("friendly: %d relationship(s) scaled, %d seeded, %d reverted to the stored value.",
-                scaled, seeded, reverted);
+        if (seeded || scaled || reverted || passed)
+            LOG("friendly: %d scaled, %d seeded, %d unchanged, %d reverted.",
+                scaled, seeded, passed, reverted);
     }
 
     bool Friendly::Ready()
