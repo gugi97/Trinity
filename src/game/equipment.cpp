@@ -303,6 +303,10 @@ namespace trinity::game
                 Read16(entry + kOff_ItemVal_RefineLevel, &refine);
                 s.refineLevel = (refine > kRefine_Max) ? kRefine_Max : static_cast<int>(refine);
 
+                uint16_t maxRef = 0;
+                if (Inventory::MaxRefineForType(tid, &maxRef))
+                    s.maxRefine = (maxRef > kRefine_Max) ? kRefine_Max : static_cast<int>(maxRef);
+
                 s.unlockedCount = UnlockedCount(entry);
                 const uintptr_t data = SocketData(entry);
                 for (int k = 0; k < Equipment::kMaxSockets; ++k)
@@ -439,13 +443,26 @@ namespace trinity::game
     {
         if (persisted) *persisted = false;
         if (level < 0) level = 0;
-        if (level > kRefine_Max) level = kRefine_Max;
-        const uint16_t lvl = static_cast<uint16_t>(level);
 
         const uintptr_t comp = ClientComp();
         if (!comp) return false;
         const uintptr_t entry = FindEntryByTag(comp, tag);
         if (!entry) return false;
+
+        // Only write a level the item actually defines. +0x0A is the enchant
+        // level and the engine resolves it by matching against that item's own
+        // _enchantDataList; a level with no entry there leaves it holding a
+        // number it cannot resolve, which is what "max refine, then switch to
+        // hands" crashed on - fists and other non-refinable equipment have no
+        // list at all. Same shape as the MaxEnduranceForType guard in
+        // RepairAllWorn: ask the item table first, skip the item if it says no.
+        uint16_t tid = 0;
+        if (!Read16(entry + kOff_InvSlot_TypeId, &tid) || tid == kInvSlot_EmptyType) return false;
+        uint16_t maxLvl = 0;
+        if (!Inventory::MaxRefineForType(tid, &maxLvl)) return false;
+        if (level > maxLvl) level = maxLvl;
+        const uint16_t lvl = static_cast<uint16_t>(level);
+
         int64_t instId = 0;
         if (!Read64(entry + kOff_ItemVal_InstanceId, &instId)) return false;
 
@@ -549,14 +566,19 @@ namespace trinity::game
         if (persistedAll) *persistedAll = true;
         uint16_t tags[kMaxWorn];
         const int n = CollectTags(tags, kMaxWorn);
-        int changed = 0;
+        int changed = 0, skipped = 0;
         for (int i = 0; i < n; ++i)
         {
             bool durable = false;
+            // kRefineMax is only a ceiling here. SetRefine clamps to whatever
+            // this particular piece defines and refuses outright when it
+            // defines nothing, so a loadout with a lantern and bare fists in it
+            // comes out with those two untouched instead of corrupted.
             if (SetRefine(tags[i], kRefineMax, &durable)) ++changed;
+            else { ++skipped; continue; }
             if (!durable && persistedAll) *persistedAll = false;
         }
-        LOG("equipment: refined %d/%d worn piece(s) to +%d.", changed, n, kRefineMax);
+        LOG("equipment: refined %d/%d worn piece(s); %d not refinable.", changed, n, skipped);
         return changed;
     }
 

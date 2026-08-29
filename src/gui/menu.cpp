@@ -503,17 +503,18 @@ namespace trinity::gui
         {
             const bool durable = game::Equipment::EditsPersist();
 
-            if (ui::Option("Max Refine All (+10)",
-                           durable ? "Refines every worn piece to +10."
-                                   : "Refines every worn piece to +10. Server copy not "
-                                     "resolved yet, so this may not survive a reload."))
+            if (ui::Option("Max Refine All",
+                           durable ? "Refines every worn piece to its own maximum. Pieces "
+                                     "the game does not refine are left alone."
+                                   : "Refines every worn piece to its own maximum. Server "
+                                     "copy not resolved yet, so this may not survive a reload."))
             {
                 bool all = false;
                 const int k = game::Equipment::RefineAllMax(&all);
                 snprintf(s_eqBatchMsg, sizeof(s_eqBatchMsg),
                          k == 0 ? "Nothing to refine."
-                                : (all ? "Refined %d piece(s) to +10."
-                                       : "Refined %d piece(s) to +10 - some are this session only."),
+                                : (all ? "Refined %d piece(s)."
+                                       : "Refined %d piece(s) - some are this session only."),
                          k);
             }
 
@@ -615,13 +616,24 @@ namespace trinity::gui
             }
         }
 
-        // Refinement (0..10) - applies to every piece, sockets or not, so it sits
-        // above the socket-only early-out. Left/Right steps the level; each change
-        // writes both realms and persists.
+        // Refinement - applies to every piece, sockets or not, so it sits above
+        // the socket-only early-out. Left/Right steps the level; each change
+        // writes both realms and persists. The ceiling is the item's own, out of
+        // its refinement table, not a flat 10: not everything you can wear is
+        // refinable at all.
+        if (si.maxRefine <= 0)
+        {
+            // The game defines no refinement levels for this item, so there is
+            // no level to set - showing a stepper here would only offer a write
+            // SetRefine is going to refuse anyway.
+            ui::Option("Refinement: not available",
+                       "The game defines no refinement levels for this item.");
+        }
+        else
         {
             int lvl = s_eqRefine;
-            if (ui::IntOption("Refinement", &lvl, 0, game::Equipment::kRefineMax, 1, si.refineLevel,
-                              "Refine this piece from 0 to 10."))
+            if (ui::IntOption("Refinement", &lvl, 0, si.maxRefine, 1, si.refineLevel,
+                              "Refine this piece. The maximum is the item's own."))
             {
                 s_eqRefine = lvl;
                 bool p = false;

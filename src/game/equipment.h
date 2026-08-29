@@ -79,6 +79,7 @@ namespace trinity::game
             int      unlockedCount; // sockets currently usable (0..5)
             int      filledCount;   // of those, how many hold a gear
             int      refineLevel;   // refinement/enhancement level (0..10)
+            int      maxRefine;     // highest level this item type defines; 0 = not refinable
             char     slotName[24];
             char     itemName[64];
             char     icon[96];      // sprite name for ui::DrawItemIcon
@@ -115,6 +116,10 @@ namespace trinity::game
         // an out-of-band level, can only be confirmed in-game. On success the
         // state is marked dirty so the next Tick runs the same effect refresh a
         // socket edit does, the best available "apply now" lever.
+        // Fails, without writing, on an item the game gives no refinement data
+        // (fists, cosmetics, tools); a level above what the item defines is
+        // clamped down to it rather than refused. SlotInfo::maxRefine reports
+        // the same thing to the UI up front.
         static bool SetRefine(uint16_t tag, int level, bool* persisted = nullptr);
 
         // Unlock every socket on the piece (open all five). Durable, like the

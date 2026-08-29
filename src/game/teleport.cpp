@@ -25,6 +25,7 @@
 #include "inventory.h"
 #include "dye.h"
 #include "equipment.h"
+#include "friendly.h"
 #include "../mem/scanner.h"
 #include "../mem/safe_memory.h"
 #include "../mem/hooks.h"
@@ -1165,6 +1166,10 @@ namespace trinity::game
             // Re-apply equipped effects after an abyss-gear socket edit (same
             // engine pass, same game-thread requirement as the dye apply).
             Equipment::Tick();
+
+            // Log-only: flushes one line per burst of trust writes. Nothing
+            // here touches game state, it just needs a regular heartbeat.
+            Friendly::Tick();
 
             // Fire a queued fast-travel on the game thread (matching the game).
             if (g_pendValid.load(std::memory_order_acquire) && g_travelFn)

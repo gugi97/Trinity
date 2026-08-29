@@ -3097,6 +3097,34 @@ namespace trinity::game
         return true;
     }
 
+    bool Inventory::MaxRefineForType(uint16_t typeId, uint16_t* out)
+    {
+        if (!out) return false;
+        uintptr_t def = 0;
+        if (!DefForRow(g_itemTableGlobal, typeId, &def)) return false;
+
+        uintptr_t list  = 0;
+        uint32_t  count = 0;
+        if (!ReadPtr(def + kOff_ItemDef_EnchantList, &list) || list < kMinPointer) return false;
+        if (!Read32(def + kOff_ItemDef_EnchantCount, &count)) return false;
+        if (count == 0 || count > kEnchantList_SaneMax) return false;
+
+        // Take the largest level the list defines rather than assuming the
+        // entries are sorted or contiguous - we only ever hand the engine a
+        // level it has an EnchantData for.
+        uint16_t best = 0;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            uint16_t lvl = 0;
+            if (!Read16(list + static_cast<uintptr_t>(i) * kOff_EnchantData_Stride
+                            + kOff_EnchantData_Level, &lvl))
+                return false;
+            if (lvl > best) best = lvl;
+        }
+        if (best == 0) return false;
+        *out = best;
+        return true;
+    }
     bool Inventory::ItemDefAddr(uint16_t typeId, uintptr_t* out)
     {
         if (!out) return false;

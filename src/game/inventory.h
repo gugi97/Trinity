@@ -234,6 +234,14 @@ namespace trinity::game
         // The item type's maximum endurance, or false when the item has none
         // (the game marks that with 0xFFFF - see offsets.h).
         static bool MaxEnduranceForType(uint16_t typeId, uint16_t* out);
+        // --- Refinement -----------------------------------------------------
+        // The highest refinement level this item type actually defines, out of
+        // its ItemInfo _enchantDataList (see offsets.h). False means the item is
+        // not refinable at all - no list, an empty one, or an unreadable row -
+        // and the caller must then leave its level field alone. Fists,
+        // cosmetics and tools land here, which is the point: writing a level
+        // they have no data for is what crashed the weapon switch.
+        static bool MaxRefineForType(uint16_t typeId, uint16_t* out);
         // Raw ItemInfo row address - diagnostics only.
         static bool ItemDefAddr(uint16_t typeId, uintptr_t* out);
         // Sets every carried item's endurance to its own maximum. Returns how

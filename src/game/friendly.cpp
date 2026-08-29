@@ -1,6 +1,7 @@
 #include "friendly.h"
 
 #include <cstdint>
+#include <windows.h> // GetTickCount64, for the burst-summary clock
 #include <mutex>
 #include <unordered_map>
 
@@ -45,6 +46,18 @@ namespace trinity::game
         std::mutex g_cacheMx;
         std::unordered_map<uint64_t, int64_t> g_lastVal;
 
+        // Burst accounting for the log. These records arrive in clumps - a warp
+        // pushes every nearby NPC through in well under a second - so one line
+        // per record made Trinity.log unreadable (it was ~80% of a normal
+        // session). Counted here and flushed as a single line by Tick() once the
+        // burst goes quiet, which still answers the only question a bug report
+        // needs: did the multiplier scale anything, and did the value stay up.
+        // All four are touched under g_cacheMx.
+        int      g_seeded   = 0; // passed through to establish a baseline
+        int      g_scaled   = 0; // multiplied
+        int      g_reverted = 0; // came back LOWER than what we had written
+        uint64_t g_lastRec  = 0; // GetTickCount64() of the most recent record
+
         int64_t ScaleGain(int64_t oldVal, int64_t newVal, float mult)
         {
             const double scaled = static_cast<double>(oldVal) +
@@ -77,6 +90,7 @@ namespace trinity::game
             const uint64_t ckLive = base | key;  // this live relationship
 
             std::lock_guard<std::mutex> lk(g_cacheMx);
+            g_lastRec = GetTickCount64();
 
             // key == 0 is the save-loader's persistent write - every NPC's stored
             // trust arrives this way at login, one record per group, before any
@@ -102,7 +116,31 @@ namespace trinity::game
             else
             {
                 auto itBase = g_lastVal.find(ckBase);
-                oldVal = (itBase != g_lastVal.end()) ? itBase->second : 0;
+                if (itBase == g_lastVal.end())
+                {
+                    // First sight of this relationship, with no group baseline
+                    // either: SEED it and pass it through untouched.
+                    //
+                    // This used to fall through with oldVal = 0 and scale, which
+                    // is the Trust Multiplier bug. The key == 0 baseline write
+                    // the comment above describes does not actually happen in TU
+                    // 2.00.00 - a 2h session log holds ~250 of these and every
+                    // single one reads "0 -> 100", i.e. not one baseline was ever
+                    // recorded. And they were not gifts: the records arrive in
+                    // bursts on area load (15 inside one second right after a
+                    // warp), which is the engine pushing each nearby NPC stored
+                    // trust into the map. Treating that as a gain from zero
+                    // multiplied the save file itself, and every relationship in
+                    // range jumped straight to the cap.
+                    //
+                    // Seeding makes the FIRST write we see the baseline and the
+                    // second - an actual gift or greet - the thing that scales,
+                    // which is what the design intended all along.
+                    ++g_seeded;
+                    g_lastVal[ckLive] = newVal;
+                    return;
+                }
+                oldVal = itBase->second;
             }
 
             const State& st = State::Get();
@@ -112,17 +150,23 @@ namespace trinity::game
             if (on && newVal > oldVal && oldVal < kFriendly_Max)
             {
                 const int64_t s = ScaleGain(oldVal, newVal, mult);
-                // Deliberately silent. This fires once per NPC per interaction,
-                // and in a normal session it was ~80% of Trinity.log - enough to
-                // bury the startup lines a bug report actually needs. The
-                // multiplier has been verified in game; there is nothing left
-                // here worth a log line.
                 if (s != newVal && Write64(r + kOff_FriendlyRec_Value, s))
                 {
+                    ++g_scaled;
                     g_lastVal[ckLive] = s;
                     return;
                 }
             }
+
+            // Falling through with a value BELOW what we last allowed means
+            // something handed the true number back - a reload, or the
+            // server-authority copy resyncing over our client-side write. We
+            // cannot tell those apart here (unlike inventory and equipment,
+            // friendly.cpp has no per-realm walk), and reseeding is the right
+            // move for a reload, so the value is let through either way. It is
+            // counted because a session full of reverts is the signature of the
+            // second case, and that is the thing worth seeing in the log.
+            if (newVal < oldVal) ++g_reverted;
             g_lastVal[ckLive] = newVal;
         }
 
@@ -157,6 +201,30 @@ namespace trinity::game
         mem::RemoveHook(&g_petTarget);
         std::lock_guard<std::mutex> lk(g_cacheMx);
         g_lastVal.clear();
+        g_seeded = g_scaled = g_reverted = 0;
+        g_lastRec = 0;
+    }
+
+    void Friendly::Tick()
+    {
+        // Cheap enough for a per-frame call: one unlocked read of the burst
+        // clock, and the lock is only taken once a burst has actually ended.
+        const uint64_t last = g_lastRec;
+        if (!last || GetTickCount64() - last < kFriendlyBurst_QuietMs) return;
+
+        int seeded = 0, scaled = 0, reverted = 0;
+        {
+            std::lock_guard<std::mutex> lk(g_cacheMx);
+            if (!g_lastRec || GetTickCount64() - g_lastRec < kFriendlyBurst_QuietMs) return;
+            seeded   = g_seeded;
+            scaled   = g_scaled;
+            reverted = g_reverted;
+            g_seeded = g_scaled = g_reverted = 0;
+            g_lastRec = 0;
+        }
+        if (seeded || scaled || reverted)
+            LOG("friendly: %d relationship(s) scaled, %d seeded, %d reverted to the stored value.",
+                scaled, seeded, reverted);
     }
 
     bool Friendly::Ready()

@@ -1573,6 +1573,35 @@ namespace trinity::game
     inline constexpr uintptr_t kOff_ItemVal_RefineLevel = 0x0A; // u16, == kOff_ItemVal_Subtype
     inline constexpr int       kRefine_Max              = 10;
 
+    // Which levels a given item can actually be refined to. NOT every item is
+    // refinable, and the ones that are do not all stop at 10 - the engine keeps
+    // a per-item list and matches +0x0A against it entry by entry.
+    //
+    // RE 2026-08-29 (static, verified against the shipped TU 2.00.00 exe):
+    //   * ItemInfo+0x248 is _enchantDataList - a plain vector: data pointer at
+    //     +0x248, element count (u32) at +0x250, capacity at +0x254. The
+    //     deserializer at 0x141308B00 grows it and writes each element with
+    //     `imul rcx, rax, 0x70`, so the stride is 0x70.
+    //   * Each element is an EnchantData, and its FIRST field is _level, read
+    //     two bytes wide at element+0x00 by 0x1412E9EC0 (the failure string
+    //     "EnchantData? _level..." sits on that read's error path). +0x08 is
+    //     _enchantStatData, +0x48 _buyPriceList - i.e. the stats the level
+    //     grants hang off the same record.
+    //   * ItemInfo+0x218 is _dropDefaultData, whose own first u16 is
+    //     _dropEnchantLevel - the value the item CONSTRUCTOR seeds +0x0A from.
+    //     That is the direct proof +0x0A is the enchant level and not a general
+    //     subtype discriminator, despite kOff_ItemVal_Subtype naming it that.
+    //
+    // Why this matters: writing 10 into +0x0A on an item whose list has no such
+    // entry (or no list at all - fists, cosmetics, tools) leaves the engine
+    // holding a level it cannot resolve to any EnchantData, which is the shape
+    // of the "max refine, then switch to hands" crash. Gate every write on this.
+    inline constexpr uintptr_t kOff_ItemDef_EnchantList      = 0x248; // ptr, ItemInfo row
+    inline constexpr uintptr_t kOff_ItemDef_EnchantCount     = 0x250; // u32
+    inline constexpr uintptr_t kOff_EnchantData_Stride       = 0x70;
+    inline constexpr uintptr_t kOff_EnchantData_Level        = 0x00; // u16
+    inline constexpr uint32_t  kEnchantList_SaneMax          = 64;   // reject junk counts
+
     // The equipped-item EFFECT refresh (IDB sub_7C88A0): re-applies every
     // equipped item's effects - re-reading each item's abyss-gear sockets and
     // REBUILDING its derived effect data (sub_7C55B0 per item), then the final
@@ -1681,6 +1710,11 @@ namespace trinity::game
     inline constexpr uintptr_t kOff_FriendlyRec_Group = 0x04; // u16 group/bucket key
     inline constexpr uintptr_t kOff_FriendlyRec_Value = 0x20; // i64 trust value
     inline constexpr int64_t   kFriendly_Max          = 100;  // the taming cap
+    // How long the trust-record stream has to be quiet before Friendly::Tick
+    // flushes its burst summary to the log. An area load pushes every nearby
+    // relationship through in well under a second, so half a second groups a
+    // burst into one line without ever splitting one.
+    inline constexpr uint64_t  kFriendlyBurst_QuietMs = 500;
 
     // 1.18.02 encodes the SAME function differently, and the pattern above
     // cannot match it at any offset. `44 8B 41 ?` is the disp8 form of

@@ -22,9 +22,9 @@ namespace trinity::game
     //    in-process, so a large multiplier simply reaches max / tames in fewer
     //    gifts rather than overflowing.
     //
-    // Purely reactive: the hook does all the work, so there is no per-frame
-    // Tick. Inert (the hook passes everything through) unless the toggle is on
-    // and the multiplier is above 1.0x.
+    // The hook does all the work; the per-frame Tick only flushes the log
+    // summary. Inert (the hook passes everything through) unless the toggle is
+    // on and the multiplier is above 1.0x.
     class Friendly
     {
     public:
@@ -33,6 +33,12 @@ namespace trinity::game
         // disabled and the rest of the mod is unaffected.
         static bool Install();
         static void Remove();
+
+        // Flushes one summary line per burst of trust records to the log.
+        // Writes nothing else and touches no game state, so it is safe
+        // anywhere the other per-frame Ticks run; it lives on the game
+        // thread with them purely for consistency.
+        static void Tick();
 
         // True once the funnel hook is installed (the feature is available).
         static bool Ready();
