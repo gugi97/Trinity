@@ -6,14 +6,49 @@
 # Passing a define through MSBuild is the tidier idea and does not work -
 # DefineConstants is a C# property, and the C++ equivalent is per-project.
 # Editing the header is blunt, but it is the thing the compiler actually reads.
-param([string]$Version = "0.17.0")
+param(
+    [string]$Version = "0.17.0",
+    # Where the zip and the loose .asi are written. Defaults to a sibling of the
+    # repo so the release folder never lands inside it.
+    [string]$ReleaseDir = (Join-Path (Split-Path $PSScriptRoot -Parent) "Trinity-release"),
+    # Explicit cmake.exe. Only needed when the search below cannot find one.
+    [string]$CMake = ""
+)
 
 $ErrorActionPreference = "Stop"
-$cmake   = "C:\Users\Gugi Gerar\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Python\Python313\site-packages\cmake\data\bin\cmake.exe"
-$root    = "D:\dev\Trinity"
-$relDir  = "D:\dev\Trinity-release"
+
+# cmake is often not on PATH on a Windows dev box - it arrives bundled inside
+# Visual Studio or as a Python wheel. Look in the usual places rather than
+# hardcoding one machine's layout.
+function Resolve-CMake {
+    if ($CMake) {
+        if (-not (Test-Path $CMake)) { throw "-CMake `"$CMake`" does not exist" }
+        return $CMake
+    }
+    if ($env:TRINITY_CMAKE -and (Test-Path $env:TRINITY_CMAKE)) { return $env:TRINITY_CMAKE }
+    $onPath = Get-Command cmake -ErrorAction SilentlyContinue
+    if ($onPath) { return $onPath.Source }
+    $globs = @(
+        "${env:ProgramFiles}\Microsoft Visual Studio\*\*\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe",
+        "$env:LOCALAPPDATA\Packages\*\LocalCache\Roaming\Python\Python*\site-packages\cmake\data\bin\cmake.exe",
+        "$env:APPDATA\Python\Python*\site-packages\cmake\data\bin\cmake.exe"
+    )
+    foreach ($g in $globs) {
+        $hit = Get-ChildItem $g -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($hit) { return $hit.FullName }
+    }
+    throw "cmake.exe not found. Put it on PATH, set TRINITY_CMAKE, or pass -CMake <path>."
+}
+
+$cmake   = Resolve-CMake
+$root    = $PSScriptRoot
+$relDir  = $ReleaseDir
 $binOut  = "$root\build\Release\Trinity.asi"
 $verH    = "$root\src\core\version.h"
+
+if (-not (Test-Path $relDir)) { New-Item -ItemType Directory -Path $relDir | Out-Null }
+Write-Host "cmake  : $cmake"
+Write-Host "release: $relDir"
 
 $backup = [IO.File]::ReadAllText($verH)
 try {
