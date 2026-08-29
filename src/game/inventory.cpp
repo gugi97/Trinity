@@ -7,7 +7,9 @@
 #include <cstdio>
 #include <cstring>
 #include <cctype>
+#include <map>
 #include <mutex>
+#include <string>
 #include <vector>
 #include <algorithm>
 
@@ -20,6 +22,7 @@
 #include "../core/logger.h"
 #include "../core/text.h"
 #include "../core/state.h"
+#include "../core/version.h"   // TRINITY_MARKER_RESEARCH
 
 namespace trinity::game
 {
@@ -82,16 +85,6 @@ namespace trinity::game
         void*          g_insTarget   = nullptr;
         void*          g_commitTarget = nullptr;
         void*          g_expandTarget = nullptr;
-
-        // --- Theft suppression probe -----------------------------------------
-        // The game broadcasts theft/pickpocket crimes through sub_141F7A6B0.
-        // It is also called from many non-theft paths (donations, NPC interaction),
-        // so a global block crashes the game. We hook it only to collect evidence:
-        // the return address tells us whether a hit came from
-        // ClientStealItemInteractionProcessor::execute (0x141DF2728) or elsewhere.
-        using TheftCrimeReport_t = void*(__fastcall*)(void*, void*, void*, void*, void*);
-        TheftCrimeReport_t oTheftCrimeReport = nullptr;
-        void*              g_theftTarget     = nullptr;
 
         std::atomic<uintptr_t> g_holder{0};
         std::atomic<ULONGLONG> g_holderTick{0};
@@ -361,6 +354,13 @@ namespace trinity::game
             return LocString(grp + kOff_GrpDef_Name, out, n);
         }
 
+        bool GroupKey(uint16_t row, char* out, size_t n)
+        {
+            uintptr_t grp = 0;
+            if (!DefForRow(g_grpTableGlobal, row, &grp)) return false;
+            return StringField(grp + kOff_GrpDef_Key, out, n);
+        }
+
         // --- The game's own icons (see offsets.h) ----------------------------
         // An icon is named, not pathed: a u16 row in `stringinfo` whose _buffer
         // holds the sprite name ("ItemIcon_Prefab_cd_phm_02_sword_0039"). The
@@ -628,7 +628,7 @@ namespace trinity::game
         struct Item { uintptr_t slot; uint16_t typeId; int64_t qty; char name[64];
                       char key[64]; char icon[96]; uint32_t bucketIdx; uint16_t slotIdx;
                       Category cat; uint8_t tier; };
-        struct Group { Category cat; char label[48]; char tab[32]; char icon[96];
+        struct Group { Category cat; char label[48]; char tab[32]; char key[96]; char icon[96];
                        std::vector<Item> items; };
         struct Storage { uint16_t type; char name[96]; char key[48]; int rank;
                          uint16_t defSlots; uint16_t maxSlots; bool haveSlots;
@@ -1118,23 +1118,6 @@ namespace trinity::game
             return oSetExpandSlots(holder, outErr, a3, type, count);
         }
 
-        // --- Diagnostic probe for theft report boundary -----------------------
-        // Count and log the first few hits, including the return address. The
-        // goal is to prove that only hits coming from
-        // ClientStealItemInteractionProcessor::execute (return address 0x141DF2728)
-        // correspond to player theft; every other caller must keep working.
-        void* __fastcall hkTheftCrimeReport(void* a1, void* a2, void* a3, void* a4, void* a5)
-        {
-            static std::atomic<int> s_hits{0};
-            const int hit = ++s_hits;
-            if (hit <= 10)
-            {
-                LOG("theft: TheftCrimeReport hit #%d from %p (a2=%p).",
-                    hit, _ReturnAddress(), a2);
-            }
-            return oTheftCrimeReport(a1, a2, a3, a4, a5);
-        }
-
         // --- Used-count repair ------------------------------------------------
         // bucket+0x12 ("slots in use") is an INCREMENTAL accumulator the engine
         // maintains as ceil(quantity/stackMax) deltas inside its own add/remove
@@ -1283,7 +1266,6 @@ namespace trinity::game
         const uintptr_t ctorAddr   = mem::FindPattern(kSig_TrItemValueCtor);
         const uintptr_t commitAddr = mem::FindPattern(kSig_InvCommitPlacement);
         uintptr_t       freeAddr   = mem::FindPattern(kSig_InvFreePlacements);
-        const uintptr_t dtorAddr   = mem::FindPattern(kSig_TrItemValueDtor);
         if (ctorAddr)   oItemValueCtor   = reinterpret_cast<ItemValueCtor_t>(ctorAddr);
         if (commitAddr) oCommitPlacement = reinterpret_cast<CommitPlacement_t>(commitAddr);
         if (freeAddr)   oFreePlacements  = reinterpret_cast<FreePlacements_t>(freeAddr);
@@ -1304,7 +1286,17 @@ namespace trinity::game
                 freeAddr = 0;
             }
         }
-        if (dtorAddr)   oItemValueDtor   = reinterpret_cast<ItemValueDtor_t>(dtorAddr);
+        // Resolved FROM freePlacements rather than by its own signature: the
+        // per-element destructor freePlacements calls is the same function the
+        // game runs over the item it constructed, so this cannot drift apart
+        // from the ctor the way an independent signature did.
+        if (freeAddr)
+        {
+            const uintptr_t dtorAddr =
+                mem::ResolveCall(freeAddr + kOff_FreePlacements_ElemDtorCall);
+            if (dtorAddr >= kMinPointer)
+                oItemValueDtor = reinterpret_cast<ItemValueDtor_t>(dtorAddr);
+        }
         // The TEB lookup for the realm flag. Deliberately NtQueryInformationThread
         // rather than a hand-rolled `mov rax, gs:[30h]` stub: that was tried and
         // fails (bogus TEB, then an access violation on the second call - almost
@@ -1312,11 +1304,11 @@ namespace trinity::game
         if (const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll"))
             oNtQueryInfoThread = reinterpret_cast<NtQueryInformationThread_t>(
                 GetProcAddress(ntdll, "NtQueryInformationThread"));
-        if (!ctorAddr || !commitAddr || !freeAddr || !dtorAddr || !oNtQueryInfoThread)
+        if (!ctorAddr || !commitAddr || !freeAddr || !oItemValueDtor || !oNtQueryInfoThread)
             LOG_WARN("inventory: add-item path incomplete (ctor=%d commit=%d free=%d dtor=%d teb=%d)"
                      " - Add Item will be refused.",
-                     ctorAddr ? 1 : 0, commitAddr ? 1 : 0, freeAddr ? 1 : 0, dtorAddr ? 1 : 0,
-                     oNtQueryInfoThread ? 1 : 0);
+                     ctorAddr ? 1 : 0, commitAddr ? 1 : 0, freeAddr ? 1 : 0,
+                     oItemValueDtor ? 1 : 0, oNtQueryInfoThread ? 1 : 0);
 
         if (!g_candLockInit)
         {
@@ -1367,12 +1359,6 @@ namespace trinity::game
         mem::InstallHook("inventory: holder-insert", kSig_InvHolderInsert,
                          "server holder relies on the commit hook alone",
                          &hkHolderInsert, &oHolderInsert, &g_insTarget, 4);
-
-        // Diagnostic hook: prove the theft report boundary. Optional - the rest
-        // of inventory still works if the signature drifts; we just lose data.
-        mem::InstallHook("inventory: theft crime report", kSig_TheftCrimeReport,
-                         "theft suppression probe disabled",
-                         &hkTheftCrimeReport, &oTheftCrimeReport, &g_theftTarget, 4);
 
         // Durable container walk (optional but preferred - without it the
         // list only appears once the game happens to query an item count,
@@ -1444,8 +1430,8 @@ namespace trinity::game
         mem::RemoveHook(&g_qtyTarget);
         mem::RemoveHook(&g_insTarget);
         mem::RemoveHook(&g_commitTarget);
-        mem::RemoveHook(&g_expandTarget); // after the restore above, which                                          // still calls its trampoline
-        mem::RemoveHook(&g_theftTarget);
+        mem::RemoveHook(&g_expandTarget); // after the restore above, which
+                                          // still calls its trampoline
         g_holder.store(0);
         g_serverHolder.store(0);
         g_serverContainer.store(0);
@@ -1492,6 +1478,10 @@ namespace trinity::game
             // --- Currency probe (READ ONLY, once per session) ----------------
             // Runs when the Money storage comes past, because that is the point
             // at which the holder and container behind it are known good.
+            // Dev-only: the probe writes a dozen candidate-offset lines to the
+            // log and finds nothing a player can use. Kept compiled out rather
+            // than deleted - the real wallet is still unfound.
+#if TRINITY_MARKER_RESEARCH
             {
                 static bool s_moneyProbed = false;
                 if (!s_moneyProbed && store_is_money_key(stype))
@@ -1500,6 +1490,7 @@ namespace trinity::game
                     ProbeCurrency(holder, stype);
                 }
             }
+#endif
 
             Storage store{};
             store.type = stype;
@@ -1567,6 +1558,8 @@ namespace trinity::game
                     if (it.cat.tabRow == 0xFFFF ||
                         !GroupName(it.cat.tabRow, ng.tab, sizeof(ng.tab)))
                         ng.tab[0] = 0; // no top tab: legitimate, e.g. Currency items
+                    if (!GroupKey(it.cat.row, ng.key, sizeof(ng.key)))
+                        ng.key[0] = 0;
                     if (!IconForGroup(it.cat.row, ng.icon, sizeof(ng.icon)))
                         snprintf(ng.icon, sizeof(ng.icon), "%s", kIcon_Uncategorised);
                     store.groups.push_back(std::move(ng));
@@ -1995,7 +1988,16 @@ namespace trinity::game
                 }
                 if (Write64(def + kOff_ItemDef_MaxStackCount, static_cast<uint64_t>(value)))
                     any = true;
-                Write8(def + kOff_ItemDef_ApplyMaxStackCap, 1);
+                // Raise the number, never switch the gate ON. Forcing
+                // _applyMaxStackCap to 1 turned rows the engine treats as
+                // uncapped into capped ones, and the insert planner then
+                // refused them outright: Copper (1978) with a 999999 cap
+                // applied produced zero placements into a bucket that had
+                // 1166 free slots, and adding worked the moment the feature
+                // was switched off. Rows that already enforce a cap still get
+                // the bigger number, which is the whole point of the toggle.
+                if (g_origApplyCap[row])
+                    Write8(def + kOff_ItemDef_ApplyMaxStackCap, 1);
             }
             else if (g_stackCaptured[row])
             {
@@ -2115,7 +2117,82 @@ namespace trinity::game
         return any;
     }
 
-    namespace { void RunPendingAdd(); } // defined below, with the add-item path
+    namespace
+    {
+        void RunPendingAdd(); // defined below, with the add-item path
+
+        struct TrackedItem
+        {
+            uint16_t typeId = 0;
+            int64_t qty = 0;
+            char name[64]{};
+        };
+        std::vector<TrackedItem> g_trackedItems;
+        uintptr_t g_trackedHolder = 0;
+
+        void RecordLost(uint16_t typeId, int64_t qty, const char* name); // below
+
+        void TrackInventoryChanges()
+        {
+            const uintptr_t holder = CurrentHolder();
+            if (!holder) return;
+
+            uintptr_t buckets = 0;
+            uint32_t bcount = 0;
+            if (!ReadPtr(holder + kOff_InvHolder_Buckets, &buckets) || buckets < kMinPointer) return;
+            if (!Read32(holder + kOff_InvHolder_Count, &bcount) || !bcount || bcount > 4096) return;
+
+            std::map<uint16_t, TrackedItem> current;
+            for (uint32_t b = 0; b < bcount; ++b)
+            {
+                uintptr_t bucket = 0, slots = 0;
+                uint16_t count = 0;
+                if (!ReadPtr(buckets + static_cast<uintptr_t>(b) * 8, &bucket) || bucket < kMinPointer) continue;
+                if (!ReadPtr(bucket + kOff_InvBucket_Slots, &slots) || slots < kMinPointer) continue;
+                if (!Read16(bucket + kOff_InvBucket_Count, &count) || !count || count > 8192) continue;
+
+                for (uint16_t i = 0; i < count; ++i)
+                {
+                    const uintptr_t slot = slots + static_cast<uintptr_t>(i) * kInvSlot_Stride;
+                    uint16_t typeId = 0;
+                    int64_t qty = 0;
+                    if (!Read16(slot + kOff_InvSlot_TypeId, &typeId) ||
+                        typeId == 0 || typeId == kInvSlot_EmptyType) continue;
+                    if (!Read64(slot + kOff_InvSlot_Quantity, &qty) || qty <= 0) continue;
+
+                    auto& item = current[typeId];
+                    item.typeId = typeId;
+                    item.qty += qty;
+                    if (!item.name[0] && !DisplayNameForType(typeId, item.name, sizeof(item.name)))
+                    {
+                        char key[64]{};
+                        if (KeyForType(typeId, key, sizeof(key))) Prettify(key, item.name, sizeof(item.name));
+                        else snprintf(item.name, sizeof(item.name), "Item #%u", typeId);
+                    }
+                }
+            }
+
+            // A reload or character switch presents a different holder. Seed it
+            // instead of treating the old character's entire bag as sold.
+            if (holder != g_trackedHolder)
+            {
+                g_trackedHolder = holder;
+                g_trackedItems.clear();
+            }
+            else
+            {
+                for (const TrackedItem& old : g_trackedItems)
+                {
+                    const auto it = current.find(old.typeId);
+                    const int64_t now = it == current.end() ? 0 : it->second.qty;
+                    if (now < old.qty) RecordLost(old.typeId, old.qty - now, old.name);
+                }
+            }
+
+            g_trackedItems.clear();
+            for (const auto& [_, item] : current) g_trackedItems.push_back(item);
+        }
+    }
 
     void Inventory::Tick()
     {
@@ -2125,6 +2202,18 @@ namespace trinity::game
         // write in this file it calls into engine code, which the render thread
         // must never do.
         RunPendingAdd();
+
+        // Buyback history is derived from the live bag, so it also catches
+        // merchant sales and game-driven discards without a fragile shop hook.
+        {
+            static ULONGLONG s_lastTrack = 0;
+            const ULONGLONG now = GetTickCount64();
+            if (now - s_lastTrack >= 1500)
+            {
+                s_lastTrack = now;
+                TrackInventoryChanges();
+            }
+        }
 
         // Heal the used-slot accounting that quantity edits bend and reloads
         // detonate (see RepairUsedSlots - the "inventory full beside empty
@@ -2392,12 +2481,7 @@ namespace trinity::game
         int AddInRealm(uintptr_t holder, uintptr_t container, uintptr_t bucket,
                        uint16_t typeId, int64_t qty, int64_t id, const char* realm)
         {
-            // Slack on purpose. The ctor writes kItemVal_Size bytes for THIS
-            // build; if a future patch grows the value again, the overflow
-            // lands in slack instead of the stack cookie - a /GS failure is
-            // not catchable and kills the process outright, which is how this
-            // was found. Only the first kItemVal_Size bytes are meaningful.
-            alignas(16) uint8_t itemVal[kItemVal_Size + 0x40] = {}; // ZEROED: the ctor
+            alignas(16) uint8_t itemVal[kItemVal_Size] = {}; // ZEROED: the ctor
             // leaves holes (+0x0C, +0x3A, +0x54, +0x8A..) that would otherwise
             // reach the live slot - the game only gets away with an
             // uninitialised buffer because it copy-constructs first.
@@ -2408,6 +2492,8 @@ namespace trinity::game
             volatile int firstErr2 = 0;      // first failing commit's error code
             volatile uint32_t nPlaced = 0;   // placements the planner produced
             volatile bool built = false, planned = false, excepted = false;
+
+            RepairUsedSlots(holder);
 
             __try
             {
@@ -2422,17 +2508,11 @@ namespace trinity::game
                 // the planner deep-copies this vector, and an uninitialised
                 // capacity corrupts the heap (a delayed, misleading crash).
 
-                // a5=0, a7=1, a8=1, a9=0 - exactly what a real world-pickup
-                // passes (sub_1CC15C0 -> addItems). NOT the reconcile's
-                // (0,0,0,1): a9=1 is the server's trusted mode, and it REFUSES
-                // to append a new slot entry when the bucket has no empty one
-                // left - each add consumes an empty, so with (…,1) adds died
-                // with eErrNoInventorySlotNotExist once the empties ran out,
-                // until a reload rebuilt the arrays. a9=0 lets the planner
-                // append (the commit writer sub_ED65670 grows the live array
-                // itself) and enforces the game's real capacity checks instead.
+                // Exact server-reconcile recipe for a constructed item:
+                // a5=0, a7=0, a8=0, a9=1. World-pickup flags are not valid for
+                // this manually constructed transaction object.
                 oHolderInsert(reinterpret_cast<void*>(bucket), &err,
-                              reinterpret_cast<void*>(container), arr, 0, out, 1, 1, 0);
+                              reinterpret_cast<void*>(container), arr, 0, out, 0, 0, 1);
                 planned = true;
 
                 if (err == 0)
@@ -2446,7 +2526,10 @@ namespace trinity::game
                         const uint16_t slotIdx =
                             *reinterpret_cast<uint16_t*>(p + kOff_Placement_SlotIdx);
                         int err2 = 0;
-                        oCommitPlacement(reinterpret_cast<void*>(holder), &err2, nullptr,
+                        // 3rd arg: the game's own commit loop leaves the CONTAINER
+                        // in r8 here - match it rather than passing null.
+                        oCommitPlacement(reinterpret_cast<void*>(holder), &err2,
+                                         reinterpret_cast<void*>(container),
                                          reinterpret_cast<void*>(p), slotIdx);
                         if (err2 == 0) ++committed;
                         else if (!firstErr2) firstErr2 = err2;
@@ -2476,12 +2559,47 @@ namespace trinity::game
                         : "The game refused the item - see Trinity.log");
                 }
                 else if (nPlaced == 0)
-                    LOG_WARN("inventory: add[%s] %u: planner ok but 0 placements",
-                             realm, typeId);
+                {
+                    // err == 0 with nothing placed is the planner saying "I
+                    // accept this item, and there is nowhere for it to go":
+                    // every slot of its storage taken and no existing stack
+                    // able to absorb the amount. Report the bucket's own
+                    // numbers - without them this was indistinguishable from a
+                    // mod fault, and it is not one.
+                    uint16_t slots = 0, used = 0, cap = 0;
+                    Read16(bucket + kOff_InvBucket_Count,    &slots);
+                    Read16(bucket + kOff_InvBucket_UsedSlots, &used);
+                    Read16(bucket + kOff_InvBucket_MaxSlots,  &cap);
+                    // The item's own stack cap too: a bucket with free slots
+                    // that still yields no placement points at the planner
+                    // refusing to SPLIT one oversized request, not at space.
+                    int64_t maxStack = -1;
+                    uint8_t applyCap = 0xFF;
+                    uintptr_t idef = 0;
+                    if (DefForRow(g_itemTableGlobal, typeId, &idef))
+                    {
+                        Read64(idef + kOff_ItemDef_MaxStackCount,    reinterpret_cast<uint64_t*>(&maxStack));
+                        Read8 (idef + kOff_ItemDef_ApplyMaxStackCap, &applyCap);
+                    }
+                    LOG_WARN("inventory: add[%s] %u x%lld: planner ok but 0 placements "
+                             "(bucket used=%u of %u, array=%u; item maxStack=%lld applyCap=%u)",
+                             realm, typeId, static_cast<long long>(qty),
+                             static_cast<unsigned>(used), static_cast<unsigned>(cap),
+                             static_cast<unsigned>(slots),
+                             static_cast<long long>(maxStack),
+                             static_cast<unsigned>(applyCap));
+                    SetAddFailure("No room for it - that storage is full, or the stack "
+                                  "is already at its maximum. Raise Slot Size or Max "
+                                  "Stack Size and try again");
+                }
                 else
+                {
                     LOG_WARN("inventory: add[%s] %u: all %u commits failed, first err=%d",
                              realm, typeId, static_cast<unsigned>(nPlaced),
                              static_cast<int>(firstErr2));
+                    SetAddFailure("The game accepted the item then refused to place it - "
+                                  "see Trinity.log");
+                }
             }
 
             // A rejected plan does not return a placement vector. Freeing that
@@ -2541,11 +2659,10 @@ namespace trinity::game
         // Pending request: the UI runs on the render thread, but this path calls
         // into engine code and must run on the game thread (Tick).
         struct AddRequest { uint16_t typeId; int64_t qty; };
+        constexpr bool        kAddItemQuarantined = false;
         AddRequest             g_addReq{};
         std::atomic<bool>      g_addPending{false};
         std::atomic<int>       g_addState{0}; // mirrors Inventory::AddState
-        // ponytail: keep the unsafe engine transaction off until a crash dump proves its ABI.
-        std::atomic<bool>      g_addQuarantined{true};
 
         // The one add, on the GAME thread: resolves both holders, allocates one
         // shared instance id from the server authority, and stamps the item into
@@ -2637,6 +2754,17 @@ namespace trinity::game
         std::atomic<int>         g_bulkFailed{0};
         std::atomic<bool>        g_bulkActive{false};
 
+        // Armed by RestoreLost, consumed here. A queued add is not a committed
+        // one, so the lost row is only retired once the game thread has actually
+        // written the item - which is why the row used to survive a restore.
+        // Defined with the rest of the lost-item store, further down.
+        void RetireLost(uint16_t typeId, int64_t qty);
+        void ClearLostRecords();
+        std::atomic<bool> g_restoreArmed{false};
+        std::atomic<bool> g_restoreAllArmed{false};
+        uint16_t          g_restoreType = 0;
+        int64_t           g_restoreQty  = 0;
+
         void RunBulkAdd()
         {
             if (!g_bulkActive.load(std::memory_order_acquire)) return;
@@ -2659,9 +2787,21 @@ namespace trinity::game
                     g_bulkFailed.fetch_add(1, std::memory_order_relaxed);
             }
 
-            std::lock_guard<std::mutex> lk(g_bulkMutex);
-            if (g_bulkQueue.empty())
-                g_bulkActive.store(false, std::memory_order_release); // done; counts latch
+            bool finished = false;
+            {
+                std::lock_guard<std::mutex> lk(g_bulkMutex);
+                if (g_bulkQueue.empty())
+                {
+                    g_bulkActive.store(false, std::memory_order_release); // done; counts latch
+                    finished = true;
+                }
+            }
+            // Restore All expands each row into single adds, so there is no
+            // identity to match back - clear the whole list, and only when
+            // every add landed. A partial run keeps the list to retry from.
+            if (finished && g_restoreAllArmed.exchange(false, std::memory_order_acq_rel) &&
+                g_bulkFailed.load(std::memory_order_relaxed) == 0)
+                ClearLostRecords();
         }
 
         // Runs on the GAME thread, from Tick().
@@ -2671,10 +2811,14 @@ namespace trinity::game
             {
                 const AddRequest req = g_addReq;
                 g_addPending.store(false, std::memory_order_release);
-                g_addState.store(static_cast<int>(CommitAdd(req.typeId, req.qty)
-                                     ? Inventory::AddState::Added
-                                     : Inventory::AddState::Failed),
+                const bool added = CommitAdd(req.typeId, req.qty);
+                g_addState.store(static_cast<int>(added ? Inventory::AddState::Added
+                                                        : Inventory::AddState::Failed),
                                  std::memory_order_release);
+                if (added && g_restoreArmed.load(std::memory_order_acquire) &&
+                    g_restoreType == req.typeId && g_restoreQty == req.qty)
+                    RetireLost(req.typeId, req.qty);
+                g_restoreArmed.store(false, std::memory_order_release);
             }
             RunBulkAdd();
         }
@@ -2745,6 +2889,8 @@ namespace trinity::game
                     if (it.cat.tabRow == 0xFFFF ||
                         !GroupName(it.cat.tabRow, ng.tab, sizeof(ng.tab)))
                         ng.tab[0] = 0;
+                    if (!GroupKey(it.cat.row, ng.key, sizeof(ng.key)))
+                        ng.key[0] = 0;
                     if (!IconForGroup(it.cat.row, ng.icon, sizeof(ng.icon)))
                         snprintf(ng.icon, sizeof(ng.icon), "%s", kIcon_Uncategorised);
                     g_catalog.push_back(std::move(ng));
@@ -2822,13 +2968,30 @@ namespace trinity::game
         return true;
     }
 
+    bool Inventory::TypeIdForKey(const char* key, uint16_t* out)
+    {
+        if (!key || !*key || !out) return false;
+        BuildCatalog();
+        for (const Group& group : g_catalog)
+            for (const Item& item : group.items)
+                if (_stricmp(item.key, key) == 0)
+                {
+                    *out = item.typeId;
+                    return true;
+                }
+        // Every other add failure names itself; without this the caller's
+        // toast prints an empty or stale reason.
+        SetAddFailure("The game's item table has no definition for that currency");
+        return false;
+    }
+
     bool Inventory::AddItem(uint16_t typeId, int64_t qty)
     {
         if (qty < 1) return false;
         if (typeId == kInvSlot_EmptyType) return false;
-        if (g_addQuarantined.load(std::memory_order_relaxed))
+        if (kAddItemQuarantined)
         {
-            SetAddFailure("Add Item is disabled while its engine transaction is under investigation");
+            SetAddFailure("Add Item and Restore are temporarily disabled after a TU 2.00.00 engine crash");
             return false;
         }
         uintptr_t def = 0;
@@ -2850,9 +3013,9 @@ namespace trinity::game
     bool Inventory::AddItemsBulk(const uint16_t* typeIds, int count, int64_t qtyEach)
     {
         if (!typeIds || count <= 0 || qtyEach < 1) return false;
-        if (g_addQuarantined.load(std::memory_order_relaxed))
+        if (kAddItemQuarantined)
         {
-            SetAddFailure("Add Item is disabled while its engine transaction is under investigation");
+            SetAddFailure("Bulk Add is temporarily disabled after a TU 2.00.00 engine crash");
             return false;
         }
         if (g_bulkActive.load(std::memory_order_acquire)) return false; // one bulk at a time
@@ -2945,12 +3108,16 @@ namespace trinity::game
     {
         const Group* g = CatGroupAt(cat);
         if (!g) return false;
-        return ContainsNoCase(g->label, "quest") ||
-               ContainsNoCase(g->label, "bounty") ||
-               ContainsNoCase(g->label, "document") ||
-               ContainsNoCase(g->label, "memor") ||
-               ContainsNoCase(g->label, "recipe") ||
-               ContainsNoCase(g->label, "relic");
+        const char* fields[] = { g->label, g->tab, g->key };
+        const char* words[] = {
+            "quest", "bounty", "wanted", "document", "book", "recipe",
+            "memor", "treasure map", "key", "pass", "relic", "artifact",
+            "collect", "medal", "token", "special"
+        };
+        for (const char* field : fields)
+            for (const char* word : words)
+                if (ContainsNoCase(field, word)) return true;
+        return false;
     }
 
     const char* Inventory::CatalogCategoryPlainName(int cat)
@@ -2961,25 +3128,216 @@ namespace trinity::game
         return g->label;
     }
 
-    int Inventory::LostCount() { return 0; }
-    bool Inventory::GetLost(int, uint16_t*, int64_t*, char*, size_t) { return false; }
-    bool Inventory::RestoreLost(int) { return false; }
-    bool Inventory::RestoreAllLost() { return false; }
-    void Inventory::ForgetLost(int) {}
-    void Inventory::ClearLost() {}
+    namespace
+    {
+        struct LostRecord { uint16_t typeId; int64_t qty; char name[64]; };
+        std::mutex g_lostMutex;
+        std::vector<LostRecord> g_lost;
+        bool g_lostLoaded = false;
+
+        std::string LostPath()
+        {
+            HMODULE self = nullptr;
+            GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(&LostPath), &self);
+            char path[MAX_PATH]{};
+            if (!self || !GetModuleFileNameA(self, path, MAX_PATH)) return "Trinity_LostItems.txt";
+            char* slash = strrchr(path, '\\');
+            if (!slash) return "Trinity_LostItems.txt";
+            snprintf(slash + 1, static_cast<size_t>(path + MAX_PATH - slash - 1),
+                     "Trinity_LostItems.txt");
+            return path;
+        }
+
+        void LoadLost()
+        {
+            std::lock_guard<std::mutex> lock(g_lostMutex);
+            if (g_lostLoaded) return;
+            g_lostLoaded = true;
+
+            FILE* f = fopen(LostPath().c_str(), "rb");
+            if (!f) return;
+            char line[256];
+            while (fgets(line, sizeof(line), f))
+            {
+                char* first = strchr(line, '|');
+                char* second = first ? strchr(first + 1, '|') : nullptr;
+                if (!first || !second) continue;
+                *first = 0;
+                *second = 0;
+                const unsigned long type = strtoul(line, nullptr, 10);
+                const long long qty = _strtoi64(first + 1, nullptr, 10);
+                if (!type || type >= kInvSlot_EmptyType || qty <= 0) continue;
+
+                LostRecord rec{};
+                rec.typeId = static_cast<uint16_t>(type);
+                rec.qty = qty;
+                char* name = second + 1;
+                name[strcspn(name, "\r\n")] = 0;
+                snprintf(rec.name, sizeof(rec.name), "%s", *name ? name : "Unknown Item");
+                g_lost.push_back(rec);
+            }
+            fclose(f);
+        }
+
+        void SaveLost()
+        {
+            std::lock_guard<std::mutex> lock(g_lostMutex);
+            FILE* f = fopen(LostPath().c_str(), "wb");
+            if (!f) return;
+            for (const LostRecord& rec : g_lost)
+                fprintf(f, "%u|%lld|%s\n", rec.typeId,
+                        static_cast<long long>(rec.qty), rec.name);
+            fclose(f);
+        }
+
+        // Drop the row a committed restore came from. Matches on identity
+        // rather than index: the list can be re-sorted or edited between the
+        // click and the game thread getting to it.
+        void ClearLostRecords()
+        {
+            {
+                std::lock_guard<std::mutex> lock(g_lostMutex);
+                g_lost.clear();
+            }
+            SaveLost();
+        }
+
+        void RetireLost(uint16_t typeId, int64_t qty)
+        {
+            {
+                std::lock_guard<std::mutex> lock(g_lostMutex);
+                for (size_t i = 0; i < g_lost.size(); ++i)
+                    if (g_lost[i].typeId == typeId && g_lost[i].qty == qty)
+                    {
+                        g_lost.erase(g_lost.begin() + static_cast<ptrdiff_t>(i));
+                        break;
+                    }
+            }
+            SaveLost();
+        }
+
+        void RecordLost(uint16_t typeId, int64_t qty, const char* name)
+        {
+            if (!typeId || typeId == kInvSlot_EmptyType || qty <= 0) return;
+            LoadLost();
+            {
+                std::lock_guard<std::mutex> lock(g_lostMutex);
+                for (LostRecord& rec : g_lost)
+                    if (rec.typeId == typeId)
+                    {
+                        rec.qty += qty;
+                        goto recorded;
+                    }
+
+                LostRecord rec{};
+                rec.typeId = typeId;
+                rec.qty = qty;
+                snprintf(rec.name, sizeof(rec.name), "%s", name && *name ? name : "Unknown Item");
+                for (char& c : rec.name) if (c == '|' || c == '\r' || c == '\n') c = ' ';
+                g_lost.insert(g_lost.begin(), rec);
+                if (g_lost.size() > 100) g_lost.pop_back();
+            }
+        recorded:
+            SaveLost();
+        }
+    }
+
+    int Inventory::LostCount()
+    {
+        LoadLost();
+        std::lock_guard<std::mutex> lock(g_lostMutex);
+        return static_cast<int>(g_lost.size());
+    }
+
+    bool Inventory::GetLost(int idx, uint16_t* typeId, int64_t* qty, char* nameOut, size_t nameCap)
+    {
+        LoadLost();
+        std::lock_guard<std::mutex> lock(g_lostMutex);
+        if (idx < 0 || idx >= static_cast<int>(g_lost.size())) return false;
+        const LostRecord& rec = g_lost[idx];
+        if (typeId) *typeId = rec.typeId;
+        if (qty) *qty = rec.qty;
+        if (nameOut && nameCap) snprintf(nameOut, nameCap, "%s", rec.name);
+        return true;
+    }
+
+    bool Inventory::RestoreLost(int idx)
+    {
+        LoadLost();
+        std::lock_guard<std::mutex> lock(g_lostMutex);
+        if (idx < 0 || idx >= static_cast<int>(g_lost.size())) return false;
+        // Arm the retire before queueing: the row is dropped by the game thread
+        // once the add actually commits, never on queue acceptance alone.
+        g_restoreType = g_lost[idx].typeId;
+        g_restoreQty  = g_lost[idx].qty;
+        g_restoreArmed.store(true, std::memory_order_release);
+        if (AddItem(g_restoreType, g_restoreQty)) return true;
+        g_restoreArmed.store(false, std::memory_order_release);
+        return false;
+    }
+
+    bool Inventory::RestoreAllLost()
+    {
+        LoadLost();
+        std::vector<uint16_t> types;
+        {
+            std::lock_guard<std::mutex> lock(g_lostMutex);
+            for (const LostRecord& rec : g_lost)
+                for (int64_t n = 0; n < rec.qty && n < 999; ++n) types.push_back(rec.typeId);
+        }
+        g_restoreAllArmed.store(true, std::memory_order_release);
+        if (types.empty() || !AddItemsBulk(types.data(), static_cast<int>(types.size()), 1))
+        {
+            g_restoreAllArmed.store(false, std::memory_order_release);
+            return false;
+        }
+        return true;
+    }
+
+    void Inventory::ForgetLost(int idx)
+    {
+        LoadLost();
+        {
+            std::lock_guard<std::mutex> lock(g_lostMutex);
+            if (idx < 0 || idx >= static_cast<int>(g_lost.size())) return;
+            g_lost.erase(g_lost.begin() + idx);
+        }
+        SaveLost();
+    }
+
+    void Inventory::ClearLost()
+    {
+        LoadLost();
+        {
+            std::lock_guard<std::mutex> lock(g_lostMutex);
+            g_lost.clear();
+        }
+        SaveLost();
+    }
 
     bool Inventory::AddCampResources(int64_t qty)
     {
-        const uint16_t campIds[] = { 11, 12, 13, 14, 15 };
-        return AddItemsBulk(campIds, static_cast<int>(sizeof(campIds) / sizeof(campIds[0])), qty);
+        const char* keys[] = {
+            "Money_Camp_Money", "Money_Camp_Food", "Money_Camp_Weapon",
+            "Money_Camp_Timber", "Money_Camp_Stone"
+        };
+        uint16_t ids[5]{};
+        for (int i = 0; i < 5; ++i)
+        {
+            if (!TypeIdForKey(keys[i], &ids[i]))
+            {
+                // Some data revisions call timber "wood"; accept that one
+                // known alias instead of pinning either revision's numeric id.
+                if (i != 3 || !TypeIdForKey("Money_Camp_Wood", &ids[i]))
+                {
+                    SetAddFailure("A camp resource definition is missing in this game build");
+                    return false;
+                }
+            }
+        }
+        return AddItemsBulk(ids, 5, qty);
     }
 
-    bool Inventory::AddCurrencies(int64_t copperQty, int64_t goldQty, int64_t pearlQty, int64_t pouchQty)
-    {
-        if (copperQty > 0) AddItem(1, copperQty);
-        if (goldQty > 0)   AddItem(53, goldQty);
-        if (pearlQty > 0)  AddItem(2, pearlQty);
-        if (pouchQty > 0)  AddItem(105, pouchQty);
-        return true;
-    }
 }

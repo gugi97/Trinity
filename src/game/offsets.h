@@ -858,19 +858,25 @@ namespace trinity::game
     // 5-byte jmp thunk sub_332C40 - thunks cannot be signatured, so this is the
     // target; calling it is identical). Its `imul rcx, rax, 0E0h` in the
     // signature below IS the 224-byte placement stride - a nice self-check.
+    // MUST start at the real prologue: the function saves rbx and pushes rdi
+    // before `sub rsp, 20h`, and its epilogue still runs `pop rdi; ret`.
+    // Entering at the `sub` (as this signature used to) makes that `pop` eat
+    // the return address and `ret` jump to a stack value - which is exactly
+    // the "faulting module: unknown" access violation Add Item was dying on.
     inline constexpr const char* kSig_InvFreePlacements =
-        "48 83 EC 20 48 8B D9 48 8B 09 48 85 C9 74 ?? 33 FF 39 7B ?? 76 ?? "
-        "0F 1F 40 ?? 8B C7 48 69 C8 E0 00 00 00";
+        "48 89 5C 24 ? 57 48 83 EC 20 48 8B D9 48 8B 09 48 85 C9 74 ?? 33 FF "
+        "39 7B ?? 76 ?? 0F 1F 40 ?? 8B C7 48 69 C8 E0 00 00 00";
     // Byte offset of that `imul` immediate inside the match. We re-read it at
     // load and refuse Add Item unless it agrees with kPlacement_Stride - the
     // stride moving under us is precisely how a placement loop would start
     // writing into the wrong slot.
-    inline constexpr uintptr_t kOff_FreePlacements_StrideImm = 31;
-    // TrItemValue dtor (IDB sub_ED6DF40, via thunk sub_1F88270). Destroys the
-    // sub-objects the ctor allocated; does NOT free the buffer itself.
-    inline constexpr const char* kSig_TrItemValueDtor =
-        "48 89 5C 24 ?? 48 89 6C 24 ?? 48 89 74 24 ?? 48 89 4C 24 ?? 57 48 83 EC 20 48 8B D9 "
-        "48 8B 89 C0 00 00 00";
+    inline constexpr uintptr_t kOff_FreePlacements_StrideImm = 37;
+    // Byte offset of freePlacements' `call <TrItemValue dtor>` - the per-element
+    // destructor it runs over the placement vector. The game calls that SAME
+    // function on the item it constructed (0x1426A198F), so resolving the dtor
+    // from here is exact, where a byte signature for it matched a different
+    // class whose +0xC0 is a refcount rather than an owned pointer.
+    inline constexpr uintptr_t kOff_FreePlacements_ElemDtorCall = 0x31;
 
     inline constexpr uintptr_t kOff_InvHolder_Container = 0x08; // holder+8 -> container
     // ItemInfo._defaultPushInventoryInfo - which storage this item goes to by
@@ -903,13 +909,11 @@ namespace trinity::game
     inline constexpr uintptr_t kOff_Sub_IdAllocator = 0x10; // (owner+0x68)+0x10 -> id allocator
     inline constexpr uintptr_t kOff_IdAlloc_Counter = 0x20; // i64, InterlockedIncrement64 target
 
-    // 1.17.00: 0xC0 -> 0xC8. Measured from the ctor, which writes a qword at
-    // +0xC0, i.e. one past the end of the old 192-byte value. Passing it a
-    // 0xC0 stack buffer overran ours by exactly 8 bytes and tripped the /GS
-    // cookie - STATUS_STACK_BUFFER_OVERRUN (0xC0000409), which SEH cannot
-    // catch, so the __try around the add path could not save it and the
-    // process died with nothing logged.
-    inline constexpr uintptr_t kItemVal_Size        = 0xC8; // == kInvSlot_Stride
+    // The live slot is 0xC8, but the constructor/planner work object is 0x108.
+    // The extra tail is part of the transaction ABI recovered from the
+    // previously working add path; truncating it trips /GS before an engine
+    // error can be reported.
+    inline constexpr uintptr_t kItemVal_Size        = 0x108;
     inline constexpr uintptr_t kOff_ItemVal_InstanceId = 0x00; // i64 (-1 out of the ctor)
     inline constexpr uintptr_t kOff_ItemVal_Subtype    = 0x0A; // u16 (reconcile zeroes it)
     // 1.17.00 grew the placement record by 8 bytes (216 -> 224) and moved the

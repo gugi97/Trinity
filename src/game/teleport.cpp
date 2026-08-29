@@ -1108,9 +1108,6 @@ namespace trinity::game
 
             if (ok)
             {
-                const float oldX = g_destX.load(std::memory_order_relaxed);
-                const float oldY = g_destY.load(std::memory_order_relaxed);
-                const float oldZ = g_destZ.load(std::memory_order_relaxed);
                 g_destSequence.fetch_add(1, std::memory_order_acq_rel); // odd: writer owns snapshot
                 g_destX.store(x, std::memory_order_relaxed);
                 g_destY.store(y, std::memory_order_relaxed);
@@ -1121,17 +1118,6 @@ namespace trinity::game
                 g_destSequence.fetch_add(1, std::memory_order_release); // even: snapshot complete
                 g_destValid.store(true, std::memory_order_release);
 
-                // Log when the destination moves, so testing can confirm which
-                // hook point is actually being used by the map.
-                static ULONGLONG s_lastLog = 0;
-                const ULONGLONG now = GetTickCount64();
-                const bool moved = fabsf(x - oldX) > 1.0f || fabsf(y - oldY) > 1.0f || fabsf(z - oldZ) > 1.0f;
-                if (moved && now - s_lastLog > 500)
-                {
-                    s_lastLog = now;
-                    LOG("teleport: destination-update r8=%p  X %.2f Y %.2f Z %.2f  origin %.2f %.2f %.2f",
-                        reinterpret_cast<void*>(r8), x, y, z, origin[0], origin[1], origin[2]);
-                }
             }
 
             return oDestinationUpdate(rcx, rdx, r8, r9);

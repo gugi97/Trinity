@@ -718,6 +718,8 @@ namespace trinity::ui
         g_y               = 64.0f * s;
         g_rowIndex        = 0;
         g_selectedDesc[0] = 0;
+        g_previewSprite[0] = 0;   // re-captured by RowBase if a row has art
+        g_previewLabel[0]  = 0;
 
         // Apply up/down using last frame's row count (immediate mode: rows for
         // this frame aren't known yet).
@@ -1031,6 +1033,37 @@ namespace trinity::ui
             dl->AddRectFilled(mn, ImVec2(mn.x + 3.0f * s, mx.y), theme::Accent);
             dl->AddText(g_fontBody, dh, ImVec2(mn.x + pad + 4.0f * s, mn.y + pad),
                         theme::Text, g_selectedDesc, nullptr, wrapW);
+        }
+
+        // Item preview: a 24 px row icon is enough to recognise a potion and
+        // useless for judging a bow or a set of armour. Draw the highlighted
+        // row's art large beside the menu, so gear can be chosen by look
+        // without spawning a hundred of them first.
+        if (State::Get().itemPreview && g_previewSprite[0])
+        {
+            const float  box = 224.0f * s;
+            const float  pad = 12.0f * s;
+            const float  th  = g_fontBody->FontSize;
+            const ImVec2 mn(g_x + g_width + 12.0f * s, g_listTop);
+            const ImVec2 mx(mn.x + box + pad * 2.0f, mn.y + box + pad * 3.0f + th);
+
+            dl->AddRectFilled(mn, mx, theme::RowBg);
+            dl->AddRectFilled(mn, ImVec2(mn.x + 3.0f * s, mx.y), theme::Accent);
+
+            const ImVec2 imn(mn.x + pad + 3.0f * s, mn.y + pad);
+            const ImVec2 imx(imn.x + box, imn.y + box);
+            // A miss is normal - some items have no art - so leave the frame.
+            if (!DrawItemIcon(dl, g_previewSprite, imn, imx))
+                dl->AddRect(imn, imx, IM_COL32(255, 255, 255, 26));
+
+            if (g_previewLabel[0])
+            {
+                const ImVec2 ts = g_fontBody->CalcTextSizeA(th, FLT_MAX, box, g_previewLabel);
+                const float  tw = ts.x < box ? ts.x : box;
+                dl->AddText(g_fontBody, th,
+                            ImVec2(imn.x + (box - tw) * 0.5f, imx.y + pad),
+                            theme::Text, g_previewLabel, nullptr, box);
+            }
         }
 
         // A menu without a capture-capable row can't be capturing text - drop

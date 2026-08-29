@@ -95,10 +95,6 @@ namespace trinity::gui
                    "Keeps player and mount stamina full.");
         changed |= ui::Toggle("Infinite Spirit", &st.infSpirit,
                    "Keeps your spirit full.");
-        changed |= ui::Toggle("Immune to Fire & Heat", &st.immuneFire,
-                   "Blocks fire damage, burning status, and desert/lava heat buildup.");
-        changed |= ui::Toggle("Immune to Cold & Frost", &st.immuneCold,
-                   "Blocks cold damage, hypothermia status, freezing, and snow stamina drain.");
         changed |= ui::ToggleFloat("Super Run", &st.superRun, &st.superRunMult, 1.0f, 10.0f, 0.25f, 2.0f, "%.2fx",
                         "Move faster than normal.");
         changed |= ui::ToggleFloat("Super Jump", &st.superJump, &st.superJumpMult, 1.0f, 10.0f, 0.25f, 2.0f, "%.2fx",
@@ -684,10 +680,13 @@ namespace trinity::gui
 
         const bool ready = game::World::Ready();
         bool changed = false;
-        changed |= ui::ToggleFloat("Game Speed", &st.gameSpeed, &st.gameSpeedMult, 0.1f, 5.0f, 0.05f, 1.0f, "%.2fx",
+        // Capped at 1.00x on purpose: on TU 2.00.00 the engine honours a scale
+        // BELOW one and ignores everything above it, so the old 5.00x half of
+        // the range was a slider that visibly moved and did nothing.
+        changed |= ui::ToggleFloat("Game Speed", &st.gameSpeed, &st.gameSpeedMult, 0.1f, 1.0f, 0.05f, 1.0f, "%.2fx",
                    ready
-                       ? "Speeds up or slows down the game."
-                       : "Speeds up or slows down the game. Unavailable right now.");
+                       ? "Slows the game down. This build of the game ignores values above 1.00x."
+                       : "Slows the game down. Unavailable right now.");
 
         const bool timeReady = game::World::TimeOfDayReady();
         changed |= ui::Toggle("Freeze Time of Day", &st.timeFrozen,
@@ -1295,8 +1294,8 @@ namespace trinity::gui
         ui::Begin();
 
         ui::Submenu("Add Item", "invadd", "Add any item in the game to your inventory.");
-        ui::Submenu("Camp Resources & Currencies", "invcamp",
-                    "Quickly add camp funds, food, timber, stone, weapons, and currencies.");
+        ui::Submenu("Currencies", "invcamp",
+                    "Quickly add Gold Bars and Overflowing Silver Pouches.");
         ui::Submenu("Quest & Special Items", "invspecial",
                     "Bounty notices, documents, quest memories, recipes and relics.");
         ui::Submenu("Item Editor", "invedit", "Browse and edit what you're carrying.");
@@ -1543,8 +1542,24 @@ namespace trinity::gui
 
     static void RenderInventoryCamp()
     {
-        ui::Begin("Camp Resources & Currencies");
+        ui::Begin("Currencies");
 
+        auto addByKey = [](const char* key, int64_t qty) -> bool
+        {
+            uint16_t typeId = 0;
+            return game::Inventory::TypeIdForKey(key, &typeId) &&
+                   game::Inventory::AddItem(typeId, qty);
+        };
+
+        // Camp resources are out for 0.18.0. The transaction succeeds - the
+        // items are created and committed without error - but they land in the
+        // PLAYER's holder, because CommitAdd only ever targets CurrentHolder()
+        // and ServerHolder(). The camp warehouse is a different destination
+        // ("CampWareHouse" is a storage the mod already knows how to read), and
+        // nothing here resolves a holder for it, so the camp stock never moves.
+        // The currency buttons below are unaffected: currencies genuinely do
+        // belong in the player's inventory.
+#if TRINITY_MARKER_RESEARCH
         if (ui::Option("Add Max Camp Resources (+99,999 All)",
                        "Adds 99,999 of Camp Funds, Food, Timber, Stone, and Weapons to your camp storage."))
         {
@@ -1553,34 +1568,33 @@ namespace trinity::gui
             else
                 ui::Toast("%s", game::Inventory::LastAddFailure());
         }
+#endif
 
-        if (ui::Option("Add 1,000,000 Copper", "Adds 1,000,000 Copper currency to your inventory."))
-        {
-            if (game::Inventory::AddItem(1, 1000000))
-                ui::Toast("Added 1,000,000 Copper");
-            else
-                ui::Toast("%s", game::Inventory::LastAddFailure());
-        }
+        // Two rows used to sit here and both were removed after testing.
+        //
+        // Copper added the item cleanly - the bag count went up - and the HUD
+        // balance never moved, which is the same wall the wallet note in
+        // RenderInventoryHome() describes: that row is a passive mirror of a
+        // figure the game spends from somewhere this mod has not reached.
+        // Pearls resolved and committed and produced no visible effect at all;
+        // it reads like the entitlement-gated items, owned by the account
+        // rather than the save.
+        //
+        // Gold Bars and Overflowing Silver Pouches are real, usable items, so
+        // they stay. They are ordinary catalog entries - Add Item can spawn
+        // both - and these rows exist only to save the search.
 
         if (ui::Option("Add 1,000 Gold Bars", "Adds 1,000 Gold Bars to your inventory."))
         {
-            if (game::Inventory::AddItem(53, 1000))
+            if (addByKey("GoldBar", 1000))
                 ui::Toast("Added 1,000 Gold Bars");
-            else
-                ui::Toast("%s", game::Inventory::LastAddFailure());
-        }
-
-        if (ui::Option("Add 1,000 Pearls", "Adds 1,000 Pearls to your inventory."))
-        {
-            if (game::Inventory::AddItem(2, 1000))
-                ui::Toast("Added 1,000 Pearls");
             else
                 ui::Toast("%s", game::Inventory::LastAddFailure());
         }
 
         if (ui::Option("Add 100 Overflowing Silver Pouches", "Adds 100 Overflowing Silver Pouches to your inventory."))
         {
-            if (game::Inventory::AddItem(105, 100))
+            if (addByKey("Heavy_Silver_Pack", 100))
                 ui::Toast("Added 100 Overflowing Silver Pouches");
             else
                 ui::Toast("%s", game::Inventory::LastAddFailure());
@@ -2230,7 +2244,8 @@ namespace trinity::gui
             if (ui::Combo("Language", &sel, s_langNames, ln,
                           "Menu language. Applies immediately."))
             {
-                const bool wasCjk = i18n::NeedsCjkGlyphs();
+                const bool wasCjk    = i18n::NeedsCjkGlyphs();
+                const bool wasKorean = i18n::NeedsKoreanGlyphs();
                 i18n::SetLanguage(sel);
                 snprintf(st.language, sizeof(st.language), "%s", i18n::LanguageCode(sel));
 
@@ -2244,7 +2259,14 @@ namespace trinity::gui
                 // Latin and CJK need different glyph sets, so crossing that
                 // line means the atlas has to be rebuilt. Anything else is just
                 // different text in the glyphs already loaded.
-                if (i18n::NeedsCjkGlyphs() != wasCjk)
+                //
+                // Korean counts as its own crossing: it loads a different face
+                // (malgun) and a different glyph range from the Chinese one, and
+                // the Chinese fonts carry no Hangul. Testing only the CJK flag
+                // let zh -> ko keep the Chinese atlas, and every Korean row
+                // rendered as '?'.
+                if (i18n::NeedsCjkGlyphs()    != wasCjk ||
+                    i18n::NeedsKoreanGlyphs() != wasKorean)
                     ui::RequestFontRebuild();
             }
         }

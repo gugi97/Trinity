@@ -176,7 +176,6 @@ namespace trinity::game
 
         // 1-Click shortcuts for Camp Resources and Currencies
         static bool AddCampResources(int64_t qty = 99999);
-        static bool AddCurrencies(int64_t copperQty = 1000000, int64_t goldQty = 1000, int64_t pearlQty = 1000, int64_t pouchQty = 100);
 
         // --- The catalog: every item the game defines -------------------------
         // Unlike the snapshot above (what you are carrying, rebuilt constantly),
@@ -204,8 +203,8 @@ namespace trinity::game
         // pointer: the game thread can rewrite the list between frames.
         static bool GetLost(int idx, uint16_t* typeId, int64_t* qty,
                             char* nameOut, size_t nameCap);
-        // Queues one row through the normal Add Item path; the row is only
-        // dropped once the add is accepted. False = the add queue was busy.
+        // Queues one row through the normal Add Item path. The row remains until
+        // explicitly forgotten because queue acceptance is not a committed add.
         static bool RestoreLost(int idx);
         // Queues every row through the bulk-add path, so progress reads out of
         // BulkAddStatus() exactly like Add All does.

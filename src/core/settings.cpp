@@ -154,7 +154,7 @@ namespace trinity
         st.dmgOutMult      = ClampF(vals.dmgOutMult, 0.0f, 20.0f);
         st.dmgInMult       = ClampF(vals.dmgInMult, 0.0f, 10.0f);
         st.gameSpeed       = vals.gameSpeed;
-        st.gameSpeedMult   = ClampF(vals.gameSpeedMult, 0.1f, 5.0f);
+        st.gameSpeedMult   = ClampF(vals.gameSpeedMult, 0.1f, 1.0f);
         st.timeFrozen      = vals.timeFrozen;
         st.superRun        = vals.superRun;
         st.superRunMult    = ClampF(vals.superRunMult, 1.0f, 10.0f);

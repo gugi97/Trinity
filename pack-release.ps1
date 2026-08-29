@@ -56,7 +56,13 @@ $stage = Join-Path $env:TEMP "trinity-pack"
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Path $stage | Out-Null
 Copy-Item $binOut $stage
-Copy-Item "$relDir\Languages" $stage -Recurse
+# Languages\ is NOT shipped. Every translation is embedded in the binary
+# (i18n_embedded.h), and Discover() lets a file on disk WIN over the
+# embedded table - so shipping our own INIs shadowed the built-in ones
+# with older data. It also made one line untranslatable: the INI splits
+# on the first "=", and the English key "World units. Tighter = fewer
+# false positives..." contains one, so that row could never match.
+# The loader stays, so a player's own Languages\*.ini still overrides us.
 
 Get-ChildItem $relDir -Filter "Trinity-*.zip" | Remove-Item -Force
 $zip = Join-Path $relDir "Trinity-$Version-CD2.00.00.zip"
