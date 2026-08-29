@@ -186,7 +186,9 @@ namespace trinity::game
     bool Friendly::Install()
     {
         const bool npc = mem::InstallHookAny("friendly: NPC trust setter",
-                                             { kSig_FriendlySetNpc, kSig_FriendlySetNpc_1180 },
+                                             { kSig_FriendlySetNpc_20001,
+                                               kSig_FriendlySetNpc,
+                                               kSig_FriendlySetNpc_1180 },
                                              "NPC gift Trust Multiplier disabled",
                                              &hkSetNpc, &oSetNpc, &g_npcTarget);
         const bool pet = mem::InstallHook("friendly: pet trust setter", kSig_FriendlySetPet,

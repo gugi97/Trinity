@@ -1711,6 +1711,35 @@ namespace trinity::game
     // save-loader drives these SAME setters at login, every relationship is
     // pre-seeded there, so the first in-game gift/feed is already scaled and a
     // loaded save is never re-scaled. See the trinity-friendly-system notes.
+    //
+    // TU 2.00.01 (1.0.0.2658) reshaped this one twice over, which is why the
+    // two patterns below both went dead and NPC Trust Multiplier disabled
+    // itself with nothing else in the log:
+    //
+    //  * The map offset is BAKED again. 2.00.00 computed it at runtime
+    //    (mov eax,imm32 / add eax,[global] / lea rbp,[rcx+rax]); 2.00.01 went
+    //    back to a plain `lea rbp,[rcx+0x18]`. That +0x18 is load-bearing and
+    //    must never be wildcarded - it is the whole difference between this
+    //    function and the pet setter below, which takes +0x38. Both maps hang
+    //    off the same owner and the two setters are genuinely separate: at
+    //    0x14239BD31 a single `jne` picks `call 0x141BDC2D0` (pet) or
+    //    `call 0x141BDBF60` (NPC), so one hook could never have covered both.
+    //
+    //  * The BODY MOVED OUT of the main code section. 0x141BDBF60 - where the
+    //    function used to live, right after the +0x18 query - now holds nothing
+    //    but a 5-byte `E9` jump to 0x14D6E97D0, over in .sbss (the packer's
+    //    unpacked-code region; kSig_StatCommit already resolves there too, so
+    //    the scanner handles it). This pattern deliberately describes the real
+    //    body, not the trampoline: MinHook needs five bytes to patch and the
+    //    trampoline is exactly five bytes long.
+    //
+    // Frame size wildcarded, everything semantic kept. Verified: exactly one
+    // match in 2658, at 0x14D6E97D0.
+    inline constexpr const char* kSig_FriendlySetNpc_20001 =
+        "49 89 E3 53 55 56 57 41 56 48 83 EC ?? 48 89 D7 48 8D 69 18 "
+        "0F B7 42 04 66 41 89 43 08";
+
+    // The 2.00.00 shape, kept as a fallback (see above for what changed).
     inline constexpr const char* kSig_FriendlySetNpc =
         "49 89 E3 53 55 56 57 41 56 48 83 EC 60 48 89 D7 B8 ?? ?? ?? ?? "
         "03 05 ?? ?? ?? ?? 48 8D 2C 01 0F B7 42 04 66 41 89 43 08";
