@@ -18,4 +18,10 @@ namespace trinity::hooks
     // Real pad state, bypassing the menu-open neutralisation applied to the
     // game. Falls back to the plain export until the hooks are up.
     DWORD XInputReadReal(DWORD userIndex, XINPUT_STATE* state);
+
+    // Same, but for whichever user slot actually has a pad in it. A DualSense
+    // (or any pad plugged in after another) can land in slot 1-3, and reading
+    // slot 0 outright meant the mod saw no controller at all. Remembers the
+    // slot that worked, so the common case stays one call.
+    DWORD XInputReadConnected(XINPUT_STATE* state);
 }

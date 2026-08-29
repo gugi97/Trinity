@@ -321,8 +321,9 @@ namespace trinity::ui
         ZeroMemory(&out, sizeof(out));
         // Read the REAL pad, bypassing the menu-open neutralisation the XInput
         // hook applies to the game - otherwise the menu couldn't read the pad
-        // it's busy blocking.
-        if (hooks::XInputReadReal(0, &out) == ERROR_SUCCESS)
+        // it's busy blocking. Whichever user slot it is in: a pad plugged in
+        // after another one lands in slot 1-3, and slot 0 alone missed it.
+        if (hooks::XInputReadConnected(&out) == ERROR_SUCCESS)
         {
             s_connected = true;
             return true;

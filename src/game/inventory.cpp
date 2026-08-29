@@ -3070,11 +3070,15 @@ namespace trinity::game
         // ...and the mirrored server slot, or the reconcile restores the item.
         const uintptr_t sh = ServerHolder();
         uintptr_t sSlot = SlotByPos(sh, it.bucketIdx, it.slotIdx, it.typeId);
-        if (sSlot)
+        if (!sSlot)
         {
-            Write16(sSlot + kOff_InvSlot_TypeId, kInvSlot_EmptyType);
-            Write64(sSlot + kOff_InvSlot_Quantity, 0);
+            // Without the server slot the reconcile puts the item straight back,
+            // so this removal did not happen. Say so instead of reporting a
+            // success the player is about to watch undo itself.
+            return false;
         }
+        Write16(sSlot + kOff_InvSlot_TypeId, kInvSlot_EmptyType);
+        Write64(sSlot + kOff_InvSlot_Quantity, 0);
 
         it.qty    = 0;
         it.typeId = kInvSlot_EmptyType; // reflect immediately until next Refresh

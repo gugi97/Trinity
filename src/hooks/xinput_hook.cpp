@@ -2,6 +2,8 @@
 
 #include <MinHook.h>
 
+#include <atomic>
+
 #include "../core/state.h"
 
 #pragma comment(lib, "xinput9_1_0.lib")
@@ -136,5 +138,34 @@ namespace trinity::hooks
         if (g_read)
             return g_read(userIndex, state);
         return XInputGetState(userIndex, state); // hooks not up yet
+    }
+
+    // Atomic: the GUI polls this from the render thread and Free Flight from the
+    // game thread.
+    static std::atomic<DWORD> g_slot{0};
+
+    DWORD XInputReadConnected(XINPUT_STATE* state)
+    {
+        const DWORD cached = g_slot.load(std::memory_order_relaxed);
+        DWORD r = XInputReadReal(cached, state);
+        if (r == ERROR_SUCCESS)
+            return r;
+
+        // XInputGetState on an empty slot is expensive, so only pay for the scan
+        // after the remembered slot has already failed. Callers keep their own
+        // backoff on total failure; do not add another here.
+        for (DWORD i = 0; i < XUSER_MAX_COUNT; ++i)
+        {
+            if (i == cached) continue;
+            r = XInputReadReal(i, state);
+            if (r == ERROR_SUCCESS)
+            {
+                g_slot.store(i, std::memory_order_relaxed);
+                return r;
+            }
+        }
+
+        g_slot.store(0, std::memory_order_relaxed); // nothing connected; start over at 0
+        return ERROR_DEVICE_NOT_CONNECTED;
     }
 }

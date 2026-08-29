@@ -1277,6 +1277,10 @@ namespace trinity::gui
                 ui::Toast("Removed %s", it.name);
                 game::Inventory::ForceRefresh(); // drop the row now, not in 120ms
             }
+            else
+            {
+                ui::Toast("Could not remove %s", it.name);
+            }
         }
         return true;
     }
@@ -1540,9 +1544,12 @@ namespace trinity::gui
         ui::End();
     }
 
+    static void ReportPendingAdd(); // defined below, next to the other add reporters
+
     static void RenderInventoryCamp()
     {
         ui::Begin("Currencies");
+        ReportPendingAdd();
 
         auto addByKey = [](const char* key, int64_t qty) -> bool
         {
@@ -1584,19 +1591,22 @@ namespace trinity::gui
         // they stay. They are ordinary catalog entries - Add Item can spawn
         // both - and these rows exist only to save the search.
 
+        // No success toast here. AddItem only QUEUES; the game thread commits a
+        // frame or so later, so "Added 1,000 Gold Bars" at the click was a claim
+        // we had not earned yet - it fired even when the commit went on to fail.
+        // ReportPendingAdd() above says "Item added" once the add really lands.
+        // The else branches stay: those are failures we know about immediately
+        // (unknown key, or the queue refused).
+
         if (ui::Option("Add 1,000 Gold Bars", "Adds 1,000 Gold Bars to your inventory."))
         {
-            if (addByKey("GoldBar", 1000))
-                ui::Toast("Added 1,000 Gold Bars");
-            else
+            if (!addByKey("GoldBar", 1000))
                 ui::Toast("%s", game::Inventory::LastAddFailure());
         }
 
         if (ui::Option("Add 100 Overflowing Silver Pouches", "Adds 100 Overflowing Silver Pouches to your inventory."))
         {
-            if (addByKey("Heavy_Silver_Pack", 100))
-                ui::Toast("Added 100 Overflowing Silver Pouches");
-            else
+            if (!addByKey("Heavy_Silver_Pack", 100))
                 ui::Toast("%s", game::Inventory::LastAddFailure());
         }
 

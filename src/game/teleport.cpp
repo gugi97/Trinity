@@ -959,7 +959,7 @@ namespace trinity::game
         // Current real-pad mask for Free Flight (buttons + trigger sentinels),
         // read on the movement thread. XInputGetState on an empty slot is slow,
         // so the poll is throttled to ~8 ms and backs off for a second after a
-        // disconnect. XInputReadReal bypasses the menu-open neutralisation (the
+        // disconnect. XInputReadConnected bypasses the menu-open neutralisation (the
         // caller already gates on !menuOpen), so it sees the true controller.
         unsigned PollFlyPadMask()
         {
@@ -976,9 +976,9 @@ namespace trinity::game
 
             XINPUT_STATE xs;
             ZeroMemory(&xs, sizeof(xs));
-            if (hooks::XInputReadReal(0, &xs) != ERROR_SUCCESS)
+            if (hooks::XInputReadConnected(&xs) != ERROR_SUCCESS)
             {
-                s_nextRetry  = now + 1000; // disconnected - stop hammering the slot
+                s_nextRetry  = now + 1000; // no pad in any slot - stop scanning all four
                 s_cachedMask = 0;
                 return 0;
             }
