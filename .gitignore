@@ -28,3 +28,11 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Working notes and one-off reverse-engineering scripts. Kept locally, not
+# published: they are addresses, dead ends and half-proven leads, not something
+# anyone downloading the mod needs. tools/shaders/ stays - it is real source.
+docs/
+tools/vtweak/
+tools/analyze_item_ctor.py
+tools/disasm_pe.py
