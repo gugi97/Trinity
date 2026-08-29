@@ -35,6 +35,25 @@ namespace trinity::game
         // has loaded into the world). Mirrors Dye::Ready().
         static bool Ready();
 
+        // --- Which character is being edited --------------------------------
+        //
+        // Crimson Desert has three protagonists and they can be in the world at
+        // once, but every function here used to address whichever body you were
+        // controlling. Pass a character object from Player::CharacterOwner() to
+        // edit a different one; pass 0 to go back to the controlled body, which
+        // is the default and the behaviour everything had before.
+        //
+        // A target that stops being tracked (despawned, swapped out) silently
+        // falls back to the controlled body rather than reading a dead pointer.
+        //
+        // NOTE on persistence: only the controlled body has a resolved
+        // server-realm counterpart. Edits to any other character are therefore
+        // client-only - they render, and they do not survive a reload.
+        // EditsPersist() already reports exactly this, and the menu already
+        // shows it, so no extra plumbing is needed to be honest about it.
+        static void      SetTarget(uintptr_t characterOwner);
+        static uintptr_t Target();
+
         // True once the server-authority equip component is resolvable, i.e.
         // add/clear edits will persist. Until then they apply visually but a
         // reload will not keep them - the UI can warn with this.

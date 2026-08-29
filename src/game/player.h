@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint> // uintptr_t, for the character accessors below
+
 namespace trinity::game
 {
     // Player stat features (God Mode, Infinite Stamina, Infinite Spirit) and
@@ -49,6 +51,21 @@ namespace trinity::game
 
         // True once at least one protagonist's health entry has been observed.
         static bool Ready();
+
+        // The active protagonists, as the stat features already track them:
+        // Kliff, whoever you are currently controlling, and any summoned
+        // companion. Refreshed every tick by the same resolve, so a swap or a
+        // summon shows up here without anything to invalidate.
+        //
+        // CharacterOwner() returns the CHARACTER object, which is what
+        // Equipment::CompForCharacter() wants - not the actor sub-object one
+        // level below it. Returns 0 for an index that is not live.
+        static int       CharacterCount();
+        static uintptr_t CharacterOwner(int idx);
+
+        // True if `owner` is one of the characters above. The equipment editor
+        // holds an index across frames, and the set can shrink under it.
+        static bool      IsTrackedCharacter(uintptr_t owner);
 
         // DEBUG: dump every player-ish character in the manager vector to the
         // console - class tag, vtable, possessor round-trip, vital-chain status

@@ -112,10 +112,13 @@ namespace trinity::game
             if (on && newVal > oldVal && oldVal < kFriendly_Max)
             {
                 const int64_t s = ScaleGain(oldVal, newVal, mult);
+                // Deliberately silent. This fires once per NPC per interaction,
+                // and in a normal session it was ~80% of Trinity.log - enough to
+                // bury the startup lines a bug report actually needs. The
+                // multiplier has been verified in game; there is nothing left
+                // here worth a log line.
                 if (s != newVal && Write64(r + kOff_FriendlyRec_Value, s))
                 {
-                    LOG("friendly: trust gain key=%u group=%u: %lld -> %lld (mult=%.1fx)",
-                        key, static_cast<unsigned>(group), oldVal, s, mult);
                     g_lastVal[ckLive] = s;
                     return;
                 }

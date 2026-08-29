@@ -419,6 +419,11 @@ namespace trinity::gui
     static int      s_eqSocket = 0;   // socket index the picker is editing
     static char     s_eqFind[48] = "";// gear picker search
     static int      s_eqRefine = 0;   // refinement stepper value (seeded on select)
+    static char     s_eqBatchMsg[128] = ""; // last whole-loadout action's result.
+    // File scope rather than a static inside RenderEquipSlots, because the
+    // character row has to clear it: "Refined 20 piece(s) to +10" is about the
+    // character you ran it on, and leaving it up after a switch reads as a
+    // report about the one now on screen.
 
     // Locate the live snapshot slot for a tag (SlotCount() rebuilds it first).
     static bool EqSlotForTag(uint16_t tag, game::Equipment::SlotInfo* out)
@@ -430,9 +435,61 @@ namespace trinity::gui
         return false;
     }
 
+    // The character selector. Crimson Desert has three protagonists and they can
+    // all be in the world at once, but this page used to edit whichever body you
+    // were controlling and nothing else - which is what the request was about.
+    //
+    // The row only appears when there is more than one character to choose
+    // between, so a solo Kliff playthrough sees exactly the page it saw before.
+    // Labels are positional: the game's own character names are not resolvable
+    // from anything the mod already reads, and a wrong name would be worse than
+    // an honest number.
+    static void RenderEquipCharacterRow()
+    {
+        const int n = game::Player::CharacterCount();
+        if (n <= 1) return;
+
+        static char        s_names[8][32];
+        static const char* s_ptrs[8];
+        const uintptr_t    controlled = game::Inventory::ClientCharacterAddr();
+        const uintptr_t    target     = game::Equipment::Target();
+
+        int sel = 0;
+        const int count = (n > 8) ? 8 : n;
+        for (int i = 0; i < count; ++i)
+        {
+            const uintptr_t o = game::Player::CharacterOwner(i);
+            snprintf(s_names[i], sizeof(s_names[i]), "Character %d%s", i + 1,
+                     (o && o == controlled) ? " (you)" : "");
+            s_ptrs[i] = s_names[i];
+            // No target set means the controlled body, so point the selector at
+            // whichever row that is rather than defaulting to row 0.
+            if (o && o == (target ? target : controlled)) sel = i;
+        }
+
+        if (ui::Combo("Character", &sel, s_ptrs, count,
+                      "Which character's equipment this page edits. Only the one you "
+                      "are controlling saves; edits to the others show up right away "
+                      "and revert on reload."))
+        {
+            const uintptr_t o = game::Player::CharacterOwner(sel);
+            game::Equipment::SetTarget((o == controlled) ? 0 : o);
+
+            // The page below is keyed on a piece of the PREVIOUS character, so
+            // drop the selection and pop anything opened underneath it.
+            s_eqTag         = 0xFFFF;
+            s_eqItem[0]     = 0;
+            s_eqSocket      = 0;
+            s_eqRefine      = 0;
+            s_eqBatchMsg[0] = 0;
+        }
+    }
+
     static void RenderEquipSlots()
     {
         ui::Begin();
+
+        RenderEquipCharacterRow();
 
         if (!game::Equipment::Ready())
         {
@@ -444,7 +501,6 @@ namespace trinity::gui
         // Whole-loadout actions first: they are the reason most people open this
         // page, and doing them piece by piece is the tedious part.
         {
-            static char s_eqBatchMsg[128] = "";
             const bool durable = game::Equipment::EditsPersist();
 
             if (ui::Option("Max Refine All (+10)",

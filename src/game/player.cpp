@@ -122,6 +122,16 @@ namespace trinity::game
         std::atomic<uintptr_t> g_actors[kMaxPlayers]{};
         std::atomic<uintptr_t> g_targetOwners[kMaxPlayers]{};
 
+        // The character objects themselves - the raw entries out of the manager
+        // vector, one level ABOVE g_actors (actor = owner + kOff_Owner_Actor).
+        // Nothing in this file needs them; they are kept so the equipment editor
+        // can address a protagonist other than the one you are controlling.
+        // equipment.cpp's CompForCharacter() takes exactly this pointer, and
+        // kOff_Container_Sub is the same 0x68 - so handing it g_actors instead
+        // would walk +0x68 twice and resolve nothing.
+        std::atomic<uintptr_t> g_owners[kMaxPlayers]{};
+        std::atomic<int>       g_ownerCount{ 0 };
+
         // Stat commit (pa_StatCommit / IDB sub_BED7820) - the single funnel every
         // HP/Stamina/Spirit write passes through. God Mode, Infinite Stamina
         // and Infinite Spirit all guard it; see the hook below.
@@ -266,7 +276,9 @@ namespace trinity::game
                 g_hpEntries[i].store(0, std::memory_order_release);
                 g_actors[i].store(0, std::memory_order_release);
                 g_targetOwners[i].store(0, std::memory_order_release);
+                g_owners[i].store(0, std::memory_order_release);
             }
+            g_ownerCount.store(0, std::memory_order_release);
             for (int i = 0; i < kMaxStatEntries; ++i)
             {
                 g_stamEntries[i].store(0, std::memory_order_release);
@@ -360,6 +372,7 @@ namespace trinity::game
                 g_hpEntries[nPlayers].store(c.statArray, std::memory_order_release);
                 g_actors[nPlayers].store(c.actor, std::memory_order_release);
                 g_targetOwners[nPlayers].store(c.targetOwner, std::memory_order_release);
+                g_owners[nPlayers].store(owner, std::memory_order_release);
                 ++nPlayers;
 
                 // The stat entries form one contiguous 0x90-stride array with
@@ -432,7 +445,12 @@ namespace trinity::game
                 g_hpEntries[i].store(0, std::memory_order_release);
                 g_actors[i].store(0, std::memory_order_release);
                 g_targetOwners[i].store(0, std::memory_order_release);
+                g_owners[i].store(0, std::memory_order_release);
             }
+            // Published last, so a reader that sees the count also sees every
+            // owner slot below it.
+            g_ownerCount.store(nPlayers, std::memory_order_release);
+
             for (int i = nStam; i < kMaxStatEntries; ++i) g_stamEntries[i].store(0, std::memory_order_release);
             for (int i = nMountStam; i < kMaxMountStamEntries; ++i) g_mountStamEntries[i].store(0, std::memory_order_release);
             for (int i = nSpir; i < kMaxStatEntries; ++i) g_spiritEntries[i].store(0, std::memory_order_release);
@@ -661,7 +679,9 @@ namespace trinity::game
             g_hpEntries[i].store(0);
             g_actors[i].store(0);
             g_targetOwners[i].store(0);
+            g_owners[i].store(0);
         }
+        g_ownerCount.store(0);
         for (int i = 0; i < kMaxStatEntries; ++i)
         {
             g_stamEntries[i].store(0);
@@ -674,6 +694,28 @@ namespace trinity::game
     bool Player::Ready()
     {
         return g_hpEntries[0].load(std::memory_order_relaxed) >= kMinPointer;
+    }
+
+    int Player::CharacterCount()
+    {
+        const int n = g_ownerCount.load(std::memory_order_acquire);
+        return (n < 0) ? 0 : (n > kMaxPlayers ? kMaxPlayers : n);
+    }
+
+    uintptr_t Player::CharacterOwner(int idx)
+    {
+        if (idx < 0 || idx >= CharacterCount()) return 0;
+        const uintptr_t o = g_owners[idx].load(std::memory_order_acquire);
+        return (o >= kMinPointer) ? o : 0;
+    }
+
+    bool Player::IsTrackedCharacter(uintptr_t owner)
+    {
+        if (owner < kMinPointer) return false;
+        const int n = CharacterCount();
+        for (int i = 0; i < n; ++i)
+            if (g_owners[i].load(std::memory_order_acquire) == owner) return true;
+        return false;
     }
 
 }

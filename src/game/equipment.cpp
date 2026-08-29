@@ -8,6 +8,7 @@
 
 #include "offsets.h"
 #include "inventory.h"
+#include "player.h"
 #include "../mem/scanner.h"
 #include "../mem/safe_memory.h"
 #include "../core/logger.h"
@@ -65,8 +66,38 @@ namespace trinity::game
             return CompValid(comp) ? comp : 0;
         }
 
-        uintptr_t ClientComp() { return CompForCharacter(Inventory::ClientCharacterAddr()); }
-        uintptr_t ServerComp() { return CompForCharacter(Inventory::ServerCharacterAddr()); }
+        // The character being edited. 0 = the body you are controlling, which
+        // is what every caller used to get unconditionally. Set from the menu.
+        std::atomic<uintptr_t> g_target{ 0 };
+
+        // The selected character, or 0 to mean "the controlled body". A target
+        // that has stopped being tracked - despawned, or swapped out from under
+        // an open menu - is cleared here rather than dereferenced.
+        uintptr_t ActiveTarget()
+        {
+            const uintptr_t t = g_target.load(std::memory_order_acquire);
+            if (!t) return 0;
+            if (Player::IsTrackedCharacter(t)) return t;
+            g_target.store(0, std::memory_order_release);
+            return 0;
+        }
+
+        uintptr_t ClientComp()
+        {
+            if (const uintptr_t t = ActiveTarget()) return CompForCharacter(t);
+            return CompForCharacter(Inventory::ClientCharacterAddr());
+        }
+
+        uintptr_t ServerComp()
+        {
+            // Only the controlled body has a resolved server-realm character
+            // (Inventory tracks exactly one per realm). For anyone else there is
+            // no second copy to mirror into, so say so instead of writing into
+            // the wrong character's server record - every caller already treats
+            // 0 as "client-only, not durable", and EditsPersist() surfaces it.
+            if (ActiveTarget()) return 0;
+            return CompForCharacter(Inventory::ServerCharacterAddr());
+        }
 
         // The TrItemValue copy the component keeps for the equipped slot `tag`.
         uintptr_t FindEntryByTag(uintptr_t comp, uint16_t tag)
@@ -318,6 +349,15 @@ namespace trinity::game
 
     bool Equipment::Ready()        { return ClientComp() != 0; }
     bool Equipment::EditsPersist() { return ServerComp() != 0; }
+
+    void Equipment::SetTarget(uintptr_t characterOwner)
+    {
+        if (characterOwner && !Player::IsTrackedCharacter(characterOwner)) return;
+        g_target.store(characterOwner, std::memory_order_release);
+        g_dirty.store(true, std::memory_order_release); // re-apply on the next Tick
+    }
+
+    uintptr_t Equipment::Target() { return ActiveTarget(); }
 
     int Equipment::SlotCount()
     {

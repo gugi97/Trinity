@@ -219,6 +219,8 @@ inline const TranslationEntry kEmbedded_id[] = {
     { "The game's item table did not resolve, so there is nothing to list.", "Tabel item milik game tidak berhasil dibaca, jadi tidak ada yang bisa ditampilkan." },
     { "Stand somewhere worth returning to and press Save This Spot.", "Berdirilah di tempat yang layak dikunjungi lagi, lalu tekan Simpan Lokasi Ini." },
     { "This game build has no quest or document categories the mod recognises. Everything is still in Add Item.", "Build game ini tidak punya kategori quest atau dokumen yang dikenali mod. Semuanya tetap ada di Tambah Item." },
+    { "Character", "Karakter" },
+    { "Which character's equipment this page edits. Only the one you are controlling saves; edits to the others show up right away and revert on reload.", "Perlengkapan karakter mana yang diedit halaman ini. Hanya karakter yang sedang kamu kendalikan yang tersimpan; perubahan pada yang lain langsung terlihat tapi hilang saat dimuat ulang." },
 };
 
 inline const TranslationEntry kEmbedded_zh[] = {
@@ -434,6 +436,8 @@ inline const TranslationEntry kEmbedded_zh[] = {
     { "The game's item table did not resolve, so there is nothing to list.", "游戏的物品表未能解析，因此没有可列出的内容。" },
     { "Stand somewhere worth returning to and press Save This Spot.", "站在你想再回来的地方，然后按 保存当前位置。" },
     { "This game build has no quest or document categories the mod recognises. Everything is still in Add Item.", "此游戏版本没有本模组识别的任务或文档分类。所有内容仍在 添加物品 中。" },
+    { "Character", "角色" },
+    { "Which character's equipment this page edits. Only the one you are controlling saves; edits to the others show up right away and revert on reload.", "本页编辑哪个角色的装备。只有你当前操控的角色会保存；其他角色的修改立即生效，但重新载入后会恢复。" },
 };
 
 inline const TranslationEntry kEmbedded_ru[] = {
@@ -649,6 +653,8 @@ inline const TranslationEntry kEmbedded_ru[] = {
     { "The game's item table did not resolve, so there is nothing to list.", "Таблица предметов игры не определилась, поэтому выводить нечего." },
     { "Stand somewhere worth returning to and press Save This Spot.", "Встаньте там, куда стоит вернуться, и нажмите Сохранить эту точку." },
     { "This game build has no quest or document categories the mod recognises. Everything is still in Add Item.", "В этой сборке игры нет категорий заданий или документов, которые распознаёт мод. Всё по-прежнему в Добавить предмет." },
+    { "Character", "Персонаж" },
+    { "Which character's equipment this page edits. Only the one you are controlling saves; edits to the others show up right away and revert on reload.", "Снаряжение какого персонажа редактирует эта страница. Сохраняется только тот, кем вы управляете; изменения у остальных видны сразу, но сбрасываются после перезагрузки." },
 };
 
 inline const TranslationEntry kEmbedded_ko[] = {
@@ -864,6 +870,8 @@ inline const TranslationEntry kEmbedded_ko[] = {
     { "The game's item table did not resolve, so there is nothing to list.", "게임의 아이템 테이블을 해석하지 못해 표시할 항목이 없습니다." },
     { "Stand somewhere worth returning to and press Save This Spot.", "다시 오고 싶은 곳에 서서 이 위치 저장을 누르세요." },
     { "This game build has no quest or document categories the mod recognises. Everything is still in Add Item.", "이 게임 빌드에는 모드가 인식하는 퀵스트나 문서 분류가 없습니다. 모두 아이템 추가에 그대로 있습니다." },
+    { "Character", "캐릭터" },
+    { "Which character's equipment this page edits. Only the one you are controlling saves; edits to the others show up right away and revert on reload.", "이 페이지가 어느 캐릭터의 장비를 편집할지 정합니다. 현재 조종 중인 캐릭터만 저장되며, 다른 캐릭터의 변경은 즉시 보이지만 다시 불러오면 되돌아갑니다." },
 };
 inline const TranslationEntry kEmbedded_pt[] = {
     { "Dye Equipment", "Tingir Equipamento" },
@@ -1078,6 +1086,8 @@ inline const TranslationEntry kEmbedded_pt[] = {
     { "The game's item table did not resolve, so there is nothing to list.", "A tabela de itens do jogo não foi resolvida, então não há nada para listar." },
     { "Stand somewhere worth returning to and press Save This Spot.", "Fique em um lugar que valha a pena revisitar e pressione Salvar Este Ponto." },
     { "This game build has no quest or document categories the mod recognises. Everything is still in Add Item.", "Esta versão do jogo não tem categorias de missão ou documento que o mod reconheça. Tudo continua em Adicionar Item." },
+    { "Character", "Personagem" },
+    { "Which character's equipment this page edits. Only the one you are controlling saves; edits to the others show up right away and revert on reload.", "De qual personagem esta página edita o equipamento. Apenas o que você controla é salvo; alterações nos outros aparecem na hora e revertem ao recarregar." },
 };
 
 struct EmbeddedLang { const char* code; const char* name; const TranslationEntry* entries; size_t count; };
