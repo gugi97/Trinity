@@ -228,6 +228,19 @@ namespace trinity::game
             LeaveCriticalSection(&g_capLock);
         }
 
+        // Has Trinity moved this storage's expansion count? Distinguishes a
+        // storage the mod has been inside from one the player simply filled up.
+        bool OrigExpandKnown(uintptr_t bucket, uint16_t type)
+        {
+            if (!g_capLockInit) return false;
+            bool found = false;
+            EnterCriticalSection(&g_capLock);
+            for (const auto& e : g_origBucketCap)
+                if (e.bucket == bucket && e.type == type) { found = true; break; }
+            LeaveCriticalSection(&g_capLock);
+            return found;
+        }
+
         // Edge-tracking for Tick(): only re-walk the (potentially thousands of
         // rows) table when what we last successfully applied differs from what
         // the toggle currently wants - never every frame.
@@ -1174,6 +1187,63 @@ namespace trinity::game
 
                 if (occ < used)
                     Write16(bucket + kOff_InvBucket_UsedSlots, occ);
+
+                // Quest-reward headroom.
+                //
+                // The insert planner refuses a delivery it cannot fit -
+                // free space is literally bucket[0x14] - bucket[0x12] - and a
+                // quest reward has nowhere else to go, so a bucket sitting at
+                // its cap when the reward lands does not just print "full", it
+                // fails the transaction. Keep a small margin so that cannot
+                // happen.
+                //
+                // Scoped to storages Trinity has actually been inside. A player
+                // who fills a vanilla bag is not our problem to solve, and
+                // silently growing their save would be a gameplay change, not a
+                // repair. The state this exists for is ours: Slot Size raises a
+                // cap, items land above the vanilla line, and switching it back
+                // off restores the old expansion while those items stay put -
+                // leaving used ABOVE cap, where free space (cap - used) underflows
+                // its u16 and the planner's arithmetic stops meaning anything.
+                //
+                // Only ever widens, and only within a few slots of the cap, so
+                // it is inert on any storage with room. Never narrows: pulling
+                // a cap below what is already stored would strand slots.
+                if (!OrigExpandKnown(bucket, type)) continue;
+
+                uint16_t cap = 0, expand = 0;
+                if (!Read16(bucket + kOff_InvBucket_MaxSlots, &cap)) continue;
+                if (!Read16(bucket + kOff_InvBucket_ExpandSlots, &expand)) continue;
+                if (cap == 0 || cap > occ + kInvHeadroom_Trigger) continue;
+
+                // Widen through the EXPANSION count, not the cap. cap is a
+                // derived cache (row._defaultSlotCount + expand) that the
+                // engine recomputes on any expansion sync or slot buff, so a
+                // write to it alone gets reverted - see the note on
+                // kOff_InvBucket_ExpandSlots. Raising expand by the same
+                // amount survives that recompute; cap is then updated too so
+                // the margin exists on this frame rather than the next sync.
+                const int want = static_cast<int>(occ) + kInvHeadroom_Slots;
+                const int grow = want - static_cast<int>(cap);
+                if (grow <= 0) continue;
+                if (want > kInvHeadroom_CapMax) continue;   // refuse absurd caps
+                if (static_cast<int>(expand) + grow > 0xFFFF) continue;
+
+                Write16(bucket + kOff_InvBucket_ExpandSlots,
+                        static_cast<uint16_t>(expand + grow));
+                Write16(bucket + kOff_InvBucket_MaxSlots,
+                        static_cast<uint16_t>(want));
+
+                // Once per session: silent storage growth is exactly the kind
+                // of thing a bug report needs to be able to name, but it can
+                // fire on every pass, so it says its piece and stops.
+                static bool s_saidHeadroom = false;
+                if (!s_saidHeadroom)
+                {
+                    s_saidHeadroom = true;
+                    LOG("inventory: storage type %u was full (%u/%u); widened to %d "
+                        "so quest rewards still fit.", type, occ, cap, want);
+                }
             }
         }
 

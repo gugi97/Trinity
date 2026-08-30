@@ -796,6 +796,16 @@ namespace trinity::game
     // or writes 0x1A - sub_1CE8190 is its sole accessor.
     inline constexpr uintptr_t kOff_InvBucket_ExpandSlots = 0x1A; // u16, _varyExpandSlotCount
 
+    // Quest-reward headroom, applied by RepairUsedSlots. Free space is
+    // bucket[0x14] - bucket[0x12], and the insert planner refuses anything it
+    // cannot fit; a quest reward has nowhere else to go, so a storage sitting
+    // at its cap fails the transaction rather than merely reporting "full".
+    // Trigger tight and margin small: this should be invisible on any storage
+    // that has room, and is not meant to be a way to expand one.
+    inline constexpr int kInvHeadroom_Trigger = 5;    // within this many of cap
+    inline constexpr int kInvHeadroom_Slots   = 20;   // free slots to guarantee
+    inline constexpr int kInvHeadroom_CapMax  = 4000; // never widen past this
+
     // Same +8 as kItemVal_Size, and for the same reason - a slot IS a
     // TrItemValue. Confirmed independently in the engine's own slot writer
     // (reached from commit), which walks the live array with
