@@ -7,7 +7,10 @@
 # DefineConstants is a C# property, and the C++ equivalent is per-project.
 # Editing the header is blunt, but it is the thing the compiler actually reads.
 param(
-    [string]$Version = "0.17.0",
+    [string]$Version = "0.18.1",
+    # The game build this release was checked against. Goes in the zip name,
+    # because a mod that hooks by signature is only ever right about one.
+    [string]$GameVersion = "CD2.00.01",
     # Where the zip and the loose .asi are written. Defaults to a sibling of the
     # repo so the release folder never lands inside it.
     [string]$ReleaseDir = (Join-Path (Split-Path $PSScriptRoot -Parent) "Trinity-release"),
@@ -100,7 +103,7 @@ Copy-Item $binOut $stage
 # The loader stays, so a player's own Languages\*.ini still overrides us.
 
 Get-ChildItem $relDir -Filter "Trinity-*.zip" | Remove-Item -Force
-$zip = Join-Path $relDir "Trinity-$Version-CD2.00.00.zip"
+$zip = Join-Path $relDir "Trinity-$Version-$GameVersion.zip"
 Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
 Copy-Item $binOut "$relDir\Trinity.asi" -Force
 Remove-Item $stage -Recurse -Force

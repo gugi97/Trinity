@@ -1,7 +1,6 @@
 #include "friendly.h"
 
 #include <cstdint>
-#include <intrin.h> // _ReturnAddress, to name the call site in the log
 #include <windows.h> // GetTickCount64, for the burst-summary clock
 #include <mutex>
 #include <unordered_map>
@@ -76,49 +75,6 @@ namespace trinity::game
         int      g_gains    = 0; // incremental gains multiplied (greet/feed)
         uint64_t g_lastRec  = 0; // GetTickCount64() of the most recent record
 
-        // Per-record detail, for when the summary is not enough.
-        //
-        // The counters above cannot tell "this record never arrived" from
-        // "it arrived and we decided not to touch it" - a repeat that neither
-        // scales nor reverts increments nothing and is invisible. That is
-        // exactly the state a "Trust Multiplier does nothing" report leaves you
-        // in, so g_passed now counts it and, while the feature is switched ON,
-        // the first few records get a full line: which map, which relationship,
-        // what value came in, and what we did about it.
-        //
-        // Hard-capped for the process lifetime rather than throttled, because
-        // the failure this diagnoses shows up in the first handful of records
-        // or not at all - and a cap cannot degenerate into the per-NPC spam
-        // that made up most of the log before.
-        constexpr int kDetailBudget = 60;
-
-        // TU 2.00.01: return address immediately after the NPC gameplay
-        // dispatcher calls the +0x18-map setter. Area-load/sync records arrive
-        // from +0x2507110 instead and must only seed the cache.
-        constexpr uintptr_t kNpcGameplayCaller_20001 = 0x239BD3F;
-
-        int           g_detailLeft  = kDetailBudget;
-
-        // Call with g_cacheMx held.
-        // `from` is the caller RVA, and it is the field that finally tells
-        // one interaction from another. Greet and gift both end up in the
-        // same setter, so the log could never say which one a line came
-        // from - it depended on the player remembering what they pressed.
-        // The engine picks the arm at 0x14239BC73, so distinct call sites
-        // mean distinct interactions, and the RVA reads straight off the
-        // disassembly.
-        void Detail(const char* what, const char* map, uint16_t group, uint32_t key,
-                    int64_t oldVal, int64_t newVal, uintptr_t from)
-        {
-            if (g_detailLeft <= 0) return;
-            --g_detailLeft;
-            LOG("friendly/detail: %s map=%s group=%u key=%u %lld -> %lld from=+0x%llX%s",
-                what, map, group, key,
-                static_cast<long long>(oldVal), static_cast<long long>(newVal),
-                static_cast<unsigned long long>(from),
-                (g_detailLeft == 0) ? " (detail budget spent; summaries only from here)" : "");
-        }
-
         int64_t ScaleGain(int64_t oldVal, int64_t newVal, float mult)
         {
             const double scaled = static_cast<double>(oldVal) +
@@ -129,7 +85,7 @@ namespace trinity::game
         }
 
         // mapId keeps the NPC (0) and pet (1) key spaces apart in the cache.
-        void ScaleRecord(void* record, uint32_t mapId, uintptr_t from)
+        void ScaleRecord(void* record, uint32_t mapId)
         {
             const uintptr_t r = reinterpret_cast<uintptr_t>(record);
             if (r < kMinPointer) return;
@@ -145,7 +101,6 @@ namespace trinity::game
             // uninitialised insert) so we never write garbage into the record.
             if (newVal < 0 || newVal > kFriendly_Max) return;
 
-            const char* const map = mapId ? "pet" : "npc";
             const uint64_t base   = (static_cast<uint64_t>(mapId) << 48) |
                                     (static_cast<uint64_t>(group) << 32);
             const uint64_t ckBase = base;        // key == 0: the persisted baseline
@@ -180,44 +135,29 @@ namespace trinity::game
                 auto itBase = g_lastVal.find(ckBase);
                 if (itBase == g_lastVal.end())
                 {
-                    // A newly-created relationship has no load/sync baseline.
-                    // The caller identifies it as a real gameplay gain, so its
-                    // pre-write value is zero and the first greet/gift should
-                    // be multiplied rather than swallowed as a seed.
-                    if (mapId == 0 && from == kNpcGameplayCaller_20001)
-                    {
-                        oldVal = 0;
-                    }
-                    else
-                    {
-                        // First sight of this relationship, with no group baseline
-                        // either: SEED it and pass it through untouched.
-                        //
-                        // This used to fall through with oldVal = 0 and scale, which
-                        // is the Trust Multiplier bug. The key == 0 baseline write
-                        // the comment above describes does not actually happen in TU
-                        // 2.00.00 - a 2h session log holds ~250 of these and every
-                        // single one reads "0 -> 100", i.e. not one baseline was ever
-                        // recorded. And they were not gifts: the records arrive in
-                        // bursts on area load (15 inside one second right after a
-                        // warp), which is the engine pushing each nearby NPC stored
-                        // trust into the map. Treating that as a gain from zero
-                        // multiplied the save file itself, and every relationship in
-                        // range jumped straight to the cap.
-                        //
-                        // Seeding makes the FIRST write we see the baseline and the
-                        // second - an actual gift or greet - the thing that scales,
-                        // which is what the design intended all along.
-                        ++g_seeded;
-                        Detail("seed  ", map, group, key, 0, newVal, from);
-                        g_lastVal[ckLive] = newVal;
-                        return;
-                    }
+                    // First sight of this relationship, with no group baseline
+                    // either: SEED it and pass it through untouched.
+                    //
+                    // This used to fall through with oldVal = 0 and scale, which
+                    // is the Trust Multiplier bug. The key == 0 baseline write
+                    // the comment above describes does not actually happen in TU
+                    // 2.00.00 - a 2h session log holds ~250 of these and every
+                    // single one reads "0 -> 100", i.e. not one baseline was ever
+                    // recorded. And they were not gifts: the records arrive in
+                    // bursts on area load (15 inside one second right after a
+                    // warp), which is the engine pushing each nearby NPC stored
+                    // trust into the map. Treating that as a gain from zero
+                    // multiplied the save file itself, and every relationship in
+                    // range jumped straight to the cap.
+                    //
+                    // Seeding makes the FIRST write we see the baseline and the
+                    // second - an actual gift or greet - the thing that scales,
+                    // which is what the design intended all along.
+                    ++g_seeded;
+                    g_lastVal[ckLive] = newVal;
+                    return;
                 }
-                else
-                {
-                    oldVal = itBase->second;
-                }
+                oldVal = itBase->second;
             }
 
             const State& st = State::Get();
@@ -230,7 +170,6 @@ namespace trinity::game
                 if (s != newVal && Write64(r + kOff_FriendlyRec_Value, s))
                 {
                     ++g_scaled;
-                    Detail("SCALED", map, group, key, oldVal, s, from);
                     // Record what we actually wrote. Skipping this leaves
                     // oldVal frozen at the first value we ever saw, so the
                     // next record for this relationship scales from that
@@ -238,20 +177,6 @@ namespace trinity::game
                     g_lastVal[ckLive] = s;
                     return;
                 }
-                // A gain we recognised but did not change: either the
-                // multiplier worked out to the same number, or the write was
-                // refused. Worth a line - it is a different failure from never
-                // seeing the gain at all.
-                Detail("nowrite", map, group, key, oldVal, newVal, from);
-            }
-            else if (on)
-            {
-                // The feature is on and this relationship is already known, yet
-                // there is nothing to scale. This is the line that says WHY:
-                // the value did not go up (a resync or an idle re-push), or the
-                // relationship is already at the cap.
-                Detail(oldVal >= kFriendly_Max ? "at-max " : "no-gain",
-                       map, group, key, oldVal, newVal, from);
             }
 
             // Falling through with a value BELOW what we last allowed means
@@ -266,43 +191,21 @@ namespace trinity::game
             g_lastVal[ckLive] = newVal;
         }
 
-        // Caller RVA, or 0 if the module is not resolved or the return
-        // address falls outside it (a thunk, or a stack we cannot trust).
-        uintptr_t CallerRva(void* ret)
-        {
-            const mem::ModuleRegion& mod = mem::GameModule();
-            const uintptr_t r = reinterpret_cast<uintptr_t>(ret);
-            if (!mod || r < mod.base || r >= mod.base + mod.size) return 0;
-            return r - mod.base;
-        }
-
         void* __fastcall hkSetNpc(void* mapOwner, void* record)
         {
-            ScaleRecord(record, 0, CallerRva(_ReturnAddress()));
+            ScaleRecord(record, 0);
             return oSetNpc(mapOwner, record);
         }
 
         void* __fastcall hkSetPet(void* mapOwner, void* record)
         {
-            ScaleRecord(record, 1, CallerRva(_ReturnAddress()));
+            ScaleRecord(record, 1);
             return oSetPet(mapOwner, record);
         }
 
         void* __fastcall hkTrustAdd(void* rel, uint32_t* status,
                                     uint16_t group, int64_t delta)
         {
-            // One-shot proof of life. A zero in the burst summary cannot tell
-            // "the engine never called this" from "it did, with the feature
-            // switched off" - and those two want completely different fixes.
-            // The racy flag is deliberate: the worst case is a duplicate line.
-            static bool s_firstCall = true;
-            if (s_firstCall)
-            {
-                s_firstCall = false;
-                LOG("friendly: incremental trust path reached (group=%u, delta=%lld).",
-                    group, static_cast<long long>(delta));
-            }
-
             const State& st = State::Get();
             // The engine early-outs on delta <= 0 without writing; leave those.
             if (delta > 0 && st.trustMult && st.trustMultVal > 1.0f)
@@ -319,8 +222,6 @@ namespace trinity::game
                     std::lock_guard<std::mutex> lk(g_cacheMx);
                     ++g_gains;
                     g_lastRec = GetTickCount64();
-                    Detail("GAIN  ", "delta", group, 0, delta, out,
-                           CallerRva(_ReturnAddress()));
                     delta = out;
                 }
             }
@@ -347,7 +248,7 @@ namespace trinity::game
         // InstallHook is silent on success everywhere else, which left a
         // silent log genuinely ambiguous: hook missing, or hook present and
         // never called? These two say which, and cost one line each.
-        if (add) LOG("friendly: incremental path hooked - greet/feed will scale.");
+        if (add) LOG("friendly: trust gain accumulator hooked - greet and feed scale.");
 
         return npc || pet || add;
     }
@@ -383,9 +284,9 @@ g_seeded = g_scaled = g_reverted = g_passed = g_gains = 0;
             g_lastRec = 0;
         }
         if (seeded || scaled || reverted || passed || gains)
-            LOG("friendly: %d gain scaled, %d record scaled, %d seeded, "
-                "%d unchanged, %d reverted.",
-                gains, scaled, seeded, passed, reverted);
+            LOG("friendly: %d trust gain(s) multiplied, %d relationship(s) "
+                "recorded, %d unchanged, %d reverted to the stored value.",
+                gains + scaled, seeded, passed, reverted);
     }
 
     bool Friendly::Ready()
