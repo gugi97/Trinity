@@ -133,18 +133,30 @@ namespace trinity::ui
         // land in the wrong font and the right one renders '?'.
         int  cjkMerges = 0;
         const char* cjkFace = nullptr;
+        // Read once, outside the lambda: the report below needs it too, and it
+        // decides which font the user is told to install.
+        const bool korean = i18n::NeedsKoreanGlyphs();
         auto mergeCjk = [&](float size)
         {
             if (!i18n::NeedsCjkGlyphs()) return;
 
-            // Hangul is not covered by the Chinese fonts that usually come first
-            // in the fallback list, so prefer a Korean face when it is needed.
-            static const char* kCjk[]         = { "msyh.ttc", "msyh.ttf", "simsun.ttc",
-                                                  "meiryo.ttc", "malgun.ttf", nullptr };
-            static const char* kKoreanFirst[] = { "malgun.ttf", "malgunbd.ttf",
-                                                  "msyh.ttc", "msyh.ttf", "simsun.ttc",
-                                                  "meiryo.ttc", nullptr };
-            const char* const* faces = i18n::NeedsKoreanGlyphs() ? kKoreanFirst : kCjk;
+            // Hangul is not covered by the Chinese and Japanese faces, so when
+            // Korean is the language the list is Korean-ONLY - it is not a
+            // preference order with fallbacks.
+            //
+            // It used to be, and that was the bug: on a Windows without Malgun
+            // Gothic (it is an optional feature outside Korean locales) the loop
+            // fell through to msyh.ttc, merged a Chinese font carrying no Hangul,
+            // reported success, and every Korean row still drew as boxes - with
+            // nothing in the log, because a face HAD been found. Falling back to
+            // a font that cannot draw the script is worse than not falling back:
+            // it costs the user the one message that would have told them what
+            // to install.
+            static const char* kCjk[]    = { "msyh.ttc", "msyh.ttf", "simsun.ttc",
+                                             "meiryo.ttc", "malgun.ttf", nullptr };
+            static const char* kKorean[] = { "malgun.ttf", "malgunbd.ttf",
+                                             "gulim.ttc", "batang.ttc", nullptr };
+            const char* const* faces = korean ? kKorean : kCjk;
 
             char path[MAX_PATH];
             for (const char* const* n = faces; *n; ++n)
@@ -197,9 +209,15 @@ namespace trinity::ui
                     g_fontBold  ? g_fontBold->Glyphs.Size  : -1,
                     g_fontTitle ? g_fontTitle->Glyphs.Size : -1);
             }
+            else if (korean)
+                LOG_WARN("gui: no Korean font found on this system - Korean text will draw "
+                         "as boxes. Install Malgun Gothic (Windows Settings > Time & "
+                         "language > Language > add Korean), or pick another menu "
+                         "language under System.");
             else
-                LOG_WARN("gui: no CJK font found on this system - Chinese text will draw as "
-                         "'?'. Installing Microsoft YaHei (msyh.ttc) fixes it.");
+                LOG_WARN("gui: no CJK font found on this system - Chinese and Japanese "
+                         "text will draw as '?'. Installing Microsoft YaHei (msyh.ttc) "
+                         "fixes it.");
         }
 
 
