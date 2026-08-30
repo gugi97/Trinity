@@ -1373,20 +1373,69 @@ namespace trinity::hooks
         factory->Release();
     }
 
+    // Is the breadcrumb opt-in marker present next to Trinity.asi?
+    //
+    // It has to be a FILE, not a menu toggle: DRED is a process-global setting
+    // that only takes effect if it is armed before the game creates its D3D12
+    // device, which happens long before there is a menu to toggle.
+    static bool DredBreadcrumbsRequested()
+    {
+        HMODULE self = nullptr;
+        if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCSTR>(&DredBreadcrumbsRequested), &self))
+            return false;
+        char path[MAX_PATH];
+        const DWORD n = GetModuleFileNameA(self, path, MAX_PATH);
+        if (n == 0 || n >= MAX_PATH) return false;
+        char* slash = strrchr(path, '\\');
+        if (!slash) return false;
+        const size_t left = MAX_PATH - (slash + 1 - path);
+        if (snprintf(slash + 1, left, "Trinity_DredBreadcrumbs.txt") >= static_cast<int>(left))
+            return false;
+        return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+    }
+
     // Arm DRED so a later device removal is diagnosable. MUST run before the game
-    // creates its D3D12 device - we do, because the ASI loader (winmm.dll) injects
-    // us at process start, well ahead of the engine's renderer init. Global process
-    // setting: applies to the device the game subsequently creates. Cheap; the
-    // breadcrumb ring adds negligible overhead. See DumpDred.
+    // creates its D3D12 device - we do, because the ASI loader injects us at
+    // process start, well ahead of the engine's renderer init. Global process
+    // setting: applies to the device the game subsequently creates.
+    //
+    // The two halves do NOT cost the same, and this used to arm both.
+    //
+    // Page faults are passive: nothing is recorded until a device is actually
+    // removed, and the faulting address plus the resource that owned it is the
+    // half that names a culprit. That stays on.
+    //
+    // Auto-breadcrumbs are not passive - the driver writes a marker for every
+    // command list operation, every frame, forever. The comment here used to
+    // call that "negligible"; measured on a real machine it was not. Same spot,
+    // same settings, menu closed and every feature at default: 25 FPS without
+    // Trinity, 22 with it. Turning the overlay and FPS counter off changed
+    // nothing, which rules out our own drawing and leaves the always-on
+    // breadcrumb ring as the one thing still running. Microsoft quote 2-5% for
+    // it; this was 12%, because the cost scales with how many operations the
+    // game submits and this engine submits a great many.
+    //
+    // So breadcrumbs are opt-in now. Drop an empty Trinity_DredBreadcrumbs.txt
+    // next to Trinity.asi when a device-removal crash needs diagnosing, and
+    // delete it afterwards.
     static void EnableDredIfAvailable()
     {
         ID3D12DeviceRemovedExtendedDataSettings* dred = nullptr;
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred))) && dred)
         {
-            dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            const bool crumbs = DredBreadcrumbsRequested();
+            dred->SetAutoBreadcrumbsEnablement(crumbs ? D3D12_DRED_ENABLEMENT_FORCED_ON
+                                                      : D3D12_DRED_ENABLEMENT_SYSTEM_CONTROLLED);
             dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
             dred->Release();
-            LOG("DRED armed - a device removal will report GPU breadcrumbs + page faults.");
+            if (crumbs)
+                LOG_WARN("DRED armed with GPU breadcrumbs (Trinity_DredBreadcrumbs.txt "
+                         "is present). This costs frames - delete the file when done.");
+            else
+                LOG("DRED armed for page faults - a device removal will name the "
+                    "faulting resource.");
         }
         else
         {
