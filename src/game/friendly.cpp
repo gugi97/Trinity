@@ -1,6 +1,7 @@
 #include "friendly.h"
 
 #include <cstdint>
+#include <intrin.h> // _ReturnAddress, to name the call site in the log
 #include <windows.h> // GetTickCount64, for the burst-summary clock
 #include <mutex>
 #include <unordered_map>
@@ -47,11 +48,6 @@ namespace trinity::game
         TrustAdd_t oTrustAdd   = nullptr;
         void*      g_addTarget = nullptr;
 
-        // Probe only - see kSig_FriendlyHiWriter. Observes, never writes.
-        using TrustWrite_t = void*(__fastcall*)(void* self, void* a2,
-                                                uint16_t group, uint32_t value);
-        TrustWrite_t oHiWriter   = nullptr;
-        void*        g_hiTarget  = nullptr;
 
         // Last trust value we let through, per relationship. The setter writes an
         // absolute value, so we scale the increase over what we last allowed for
@@ -95,19 +91,26 @@ namespace trinity::game
         // or not at all - and a cap cannot degenerate into the per-NPC spam
         // that made up most of the log before.
         constexpr int kDetailBudget = 60;
-        constexpr int kProbeBudget  = 40; // kSig_FriendlyHiWriter, kept apart
-        int           g_probeLeft   = kProbeBudget;
+
         int           g_detailLeft  = kDetailBudget;
 
         // Call with g_cacheMx held.
+        // `from` is the caller RVA, and it is the field that finally tells
+        // one interaction from another. Greet and gift both end up in the
+        // same setter, so the log could never say which one a line came
+        // from - it depended on the player remembering what they pressed.
+        // The engine picks the arm at 0x14239BC73, so distinct call sites
+        // mean distinct interactions, and the RVA reads straight off the
+        // disassembly.
         void Detail(const char* what, const char* map, uint16_t group, uint32_t key,
-                    int64_t oldVal, int64_t newVal)
+                    int64_t oldVal, int64_t newVal, uintptr_t from)
         {
             if (g_detailLeft <= 0) return;
             --g_detailLeft;
-            LOG("friendly/detail: %s map=%s group=%u key=%u %lld -> %lld%s",
+            LOG("friendly/detail: %s map=%s group=%u key=%u %lld -> %lld from=+0x%llX%s",
                 what, map, group, key,
                 static_cast<long long>(oldVal), static_cast<long long>(newVal),
+                static_cast<unsigned long long>(from),
                 (g_detailLeft == 0) ? " (detail budget spent; summaries only from here)" : "");
         }
 
@@ -121,7 +124,7 @@ namespace trinity::game
         }
 
         // mapId keeps the NPC (0) and pet (1) key spaces apart in the cache.
-        void ScaleRecord(void* record, uint32_t mapId)
+        void ScaleRecord(void* record, uint32_t mapId, uintptr_t from)
         {
             const uintptr_t r = reinterpret_cast<uintptr_t>(record);
             if (r < kMinPointer) return;
@@ -191,7 +194,7 @@ namespace trinity::game
                     // second - an actual gift or greet - the thing that scales,
                     // which is what the design intended all along.
                     ++g_seeded;
-                    Detail("seed  ", map, group, key, 0, newVal);
+                    Detail("seed  ", map, group, key, 0, newVal, from);
                     g_lastVal[ckLive] = newVal;
                     return;
                 }
@@ -208,7 +211,7 @@ namespace trinity::game
                 if (s != newVal && Write64(r + kOff_FriendlyRec_Value, s))
                 {
                     ++g_scaled;
-                    Detail("SCALED", map, group, key, oldVal, s);
+                    Detail("SCALED", map, group, key, oldVal, s, from);
                     // Record what we actually wrote. Skipping this leaves
                     // oldVal frozen at the first value we ever saw, so the
                     // next record for this relationship scales from that
@@ -220,7 +223,7 @@ namespace trinity::game
                 // multiplier worked out to the same number, or the write was
                 // refused. Worth a line - it is a different failure from never
                 // seeing the gain at all.
-                Detail("nowrite", map, group, key, oldVal, newVal);
+                Detail("nowrite", map, group, key, oldVal, newVal, from);
             }
             else if (on)
             {
@@ -229,7 +232,7 @@ namespace trinity::game
                 // the value did not go up (a resync or an idle re-push), or the
                 // relationship is already at the cap.
                 Detail(oldVal >= kFriendly_Max ? "at-max " : "no-gain",
-                       map, group, key, oldVal, newVal);
+                       map, group, key, oldVal, newVal, from);
             }
 
             // Falling through with a value BELOW what we last allowed means
@@ -244,15 +247,25 @@ namespace trinity::game
             g_lastVal[ckLive] = newVal;
         }
 
+        // Caller RVA, or 0 if the module is not resolved or the return
+        // address falls outside it (a thunk, or a stack we cannot trust).
+        uintptr_t CallerRva(void* ret)
+        {
+            const mem::ModuleRegion& mod = mem::GameModule();
+            const uintptr_t r = reinterpret_cast<uintptr_t>(ret);
+            if (!mod || r < mod.base || r >= mod.base + mod.size) return 0;
+            return r - mod.base;
+        }
+
         void* __fastcall hkSetNpc(void* mapOwner, void* record)
         {
-            ScaleRecord(record, 0);
+            ScaleRecord(record, 0, CallerRva(_ReturnAddress()));
             return oSetNpc(mapOwner, record);
         }
 
         void* __fastcall hkSetPet(void* mapOwner, void* record)
         {
-            ScaleRecord(record, 1);
+            ScaleRecord(record, 1, CallerRva(_ReturnAddress()));
             return oSetPet(mapOwner, record);
         }
 
@@ -287,33 +300,14 @@ namespace trinity::game
                     std::lock_guard<std::mutex> lk(g_cacheMx);
                     ++g_gains;
                     g_lastRec = GetTickCount64();
-                    Detail("GAIN  ", "delta", group, 0, delta, out);
+                    Detail("GAIN  ", "delta", group, 0, delta, out,
+                           CallerRva(_ReturnAddress()));
                     delta = out;
                 }
             }
             return oTrustAdd(rel, status, group, delta);
         }
 
-        void* __fastcall hkHiWriter(void* self, void* a2,
-                                    uint16_t group, uint32_t value)
-        {
-            {
-                // Its own budget, deliberately. Sharing the record stream
-                // budget means one area load spends it all on seeds before
-                // the player has greeted anybody, and the probe - the whole
-                // point of this build - logs nothing.
-                std::lock_guard<std::mutex> lk(g_cacheMx);
-                if (g_probeLeft > 0)
-                {
-                    --g_probeLeft;
-                    LOG("friendly/probe: writer group=%u value=%u%s",
-                        group, value,
-                        g_probeLeft ? "" : " (probe budget spent)");
-                }
-                g_lastRec = GetTickCount64();
-            }
-            return oHiWriter(self, a2, group, value);
-        }
     }
 
     bool Friendly::Install()
@@ -336,12 +330,7 @@ namespace trinity::game
         // never called? These two say which, and cost one line each.
         if (add) LOG("friendly: incremental path hooked - greet/feed will scale.");
 
-        const bool hi = mem::InstallHook("friendly: relationship writer probe",
-                                         kSig_FriendlyHiWriter,
-                                         "greet/feed diagnosis unavailable",
-                                         &hkHiWriter, &oHiWriter, &g_hiTarget);
-        if (hi) LOG("friendly: relationship writer probe armed (observe only).");
-        return npc || pet || add || hi;
+        return npc || pet || add;
     }
 
     void Friendly::Remove()
@@ -349,11 +338,9 @@ namespace trinity::game
         mem::RemoveHook(&g_npcTarget);
         mem::RemoveHook(&g_petTarget);
         mem::RemoveHook(&g_addTarget);
-        mem::RemoveHook(&g_hiTarget);
         std::lock_guard<std::mutex> lk(g_cacheMx);
         g_lastVal.clear();
 g_seeded = g_scaled = g_reverted = g_passed = g_gains = 0;
-        g_probeLeft = kProbeBudget;
         g_lastRec = 0;
     }
 
