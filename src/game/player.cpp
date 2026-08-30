@@ -730,7 +730,19 @@ namespace trinity::game
         if (!out || outSize == 0) return false;
         out[0] = '\0';
 
-        static const char* const kRoster[] = { "Kliff", "Damiane", "Oongka" };
+        // Slot 3 is the mount. Named positionally like the rest, because there
+        // is no cheap type read that would tell us: g_owners is filled by
+        // matching the protagonist class vtable, so the mount is IN that class
+        // and the type-descriptor tag IsPlayerClass() uses passes for it too.
+        // The +0x48 ObjectType word would say Vehicle, but it flickers 0/3/8 on
+        // a live body and reads 1 on several characters at once in combat - it
+        // is documentation, not an identity (see offsets.h).
+        //
+        // What the observation rests on: this slot carries five worn pieces and
+        // none of them are refinable ("refined 0/5 worn piece(s); 5 not
+        // refinable"), where the protagonists carry 11 to 18 mostly refinable
+        // ones. That is tack, not armour.
+        static const char* const kRoster[] = { "Kliff", "Damiane", "Oongka", "Mount" };
         if (idx < 0 || idx >= static_cast<int>(std::size(kRoster))) return false;
 
         // A slot with no live owner is not this character - say nothing

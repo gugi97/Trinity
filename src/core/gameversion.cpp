@@ -18,7 +18,7 @@ namespace trinity
         // say so rather than imply a guarantee that was never made.
         struct KnownBuild { uint16_t revision; const char* tu; bool verified; };
         constexpr KnownBuild kKnown[] = {
-            { 2658, "2.00.01",          false },  // NPC trust setter moved; everything else re-resolves
+            { 2658, "2.00.01",          true  },  // verified: every signature re-checked, features live-tested
             { 2625, "2.00.00",          true  },  // verified: every signature re-checked
             { 2474, "1.18.02",          true  },
             { 2435, "1.18.0",           true  },
