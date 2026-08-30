@@ -757,13 +757,20 @@ namespace trinity::gui
 
         const bool ready = game::World::Ready();
         bool changed = false;
-        // Capped at 1.00x on purpose: on TU 2.00.00 the engine honours a scale
-        // BELOW one and ignores everything above it, so the old 5.00x half of
-        // the range was a slider that visibly moved and did nothing.
-        changed |= ui::ToggleFloat("Game Speed", &st.gameSpeed, &st.gameSpeedMult, 0.1f, 1.0f, 0.05f, 1.0f, "%.2fx",
+        // Back to 5.00x. The 1.00x cap was put here because values above one
+        // "visibly moved and did nothing" - true at the time, but the cause was
+        // ours: a second mechanism forced the frame delta to a fixed 1/60 s
+        // AFTER the engine had applied the multiplier, so nothing above 1.00x
+        // could survive to be seen. That mechanism is gone (see world.cpp).
+        //
+        // The engine imposes no upper bound of its own. At 0x1409481DC it takes
+        // (mult - 1.0) and skips the multiply only when that is within 1e-06 of
+        // zero - an epsilon around 1.00x, not a ceiling. Above and below it, the
+        // scale is applied the same way.
+        changed |= ui::ToggleFloat("Game Speed", &st.gameSpeed, &st.gameSpeedMult, 0.1f, 5.0f, 0.05f, 1.0f, "%.2fx",
                    ready
-                       ? "Slows the game down. This build of the game ignores values above 1.00x."
-                       : "Slows the game down. Unavailable right now.");
+                       ? "Scales how fast the whole game runs. Below 1.00x is slow motion, above it speeds everything up."
+                       : "Scales how fast the whole game runs. Unavailable right now.");
 
         const bool timeReady = game::World::TimeOfDayReady();
         changed |= ui::Toggle("Freeze Time of Day", &st.timeFrozen,

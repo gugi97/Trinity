@@ -112,10 +112,11 @@ namespace trinity
         bool  trustMult    = false;
         float trustMultVal = 3.0f;
 
-        // World features (world.cpp). Game Speed forces the engine's fixed
-        // frame-timestep so the whole simulation runs at gameSpeedMult of the
-        // 60-FPS-equivalent rate; the toggle off restores the engine's own
-        // real-time delta.
+        // World features (world.cpp). Game Speed sets the engine's OWN time
+        // scale - the multiplier it already applies to its frame delta - so the
+        // simulation runs at gameSpeedMult of real time whatever the framerate.
+        // Below 1.00x is slow motion, above it speeds the game up; the toggle
+        // off restores a scale of exactly 1.0.
         bool  gameSpeed     = false;
         float gameSpeedMult = 1.0f;
 
