@@ -95,6 +95,8 @@ namespace trinity::game
         // or not at all - and a cap cannot degenerate into the per-NPC spam
         // that made up most of the log before.
         constexpr int kDetailBudget = 60;
+        constexpr int kProbeBudget  = 40; // kSig_FriendlyHiWriter, kept apart
+        int           g_probeLeft   = kProbeBudget;
         int           g_detailLeft  = kDetailBudget;
 
         // Call with g_cacheMx held.
@@ -296,9 +298,18 @@ namespace trinity::game
                                     uint16_t group, uint32_t value)
         {
             {
+                // Its own budget, deliberately. Sharing the record stream
+                // budget means one area load spends it all on seeds before
+                // the player has greeted anybody, and the probe - the whole
+                // point of this build - logs nothing.
                 std::lock_guard<std::mutex> lk(g_cacheMx);
-                Detail("WRITER", "hi-lvl", group, 0,
-                       static_cast<int64_t>(value), static_cast<int64_t>(value));
+                if (g_probeLeft > 0)
+                {
+                    --g_probeLeft;
+                    LOG("friendly/probe: writer group=%u value=%u%s",
+                        group, value,
+                        g_probeLeft ? "" : " (probe budget spent)");
+                }
                 g_lastRec = GetTickCount64();
             }
             return oHiWriter(self, a2, group, value);
@@ -341,7 +352,8 @@ namespace trinity::game
         mem::RemoveHook(&g_hiTarget);
         std::lock_guard<std::mutex> lk(g_cacheMx);
         g_lastVal.clear();
-        g_seeded = g_scaled = g_reverted = g_passed = g_gains = 0;
+g_seeded = g_scaled = g_reverted = g_passed = g_gains = 0;
+        g_probeLeft = kProbeBudget;
         g_lastRec = 0;
     }
 
