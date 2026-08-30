@@ -201,6 +201,11 @@ namespace trinity::game
                 {
                     ++g_scaled;
                     Detail("SCALED", map, group, key, oldVal, s);
+                    // Record what we actually wrote. Skipping this leaves
+                    // oldVal frozen at the first value we ever saw, so the
+                    // next record for this relationship scales from that
+                    // stale baseline again instead of from the new one.
+                    g_lastVal[ckLive] = s;
                     return;
                 }
                 // A gain we recognised but did not change: either the
@@ -246,6 +251,18 @@ namespace trinity::game
         void* __fastcall hkTrustAdd(void* rel, uint32_t* status,
                                     uint16_t group, int64_t delta)
         {
+            // One-shot proof of life. A zero in the burst summary cannot tell
+            // "the engine never called this" from "it did, with the feature
+            // switched off" - and those two want completely different fixes.
+            // The racy flag is deliberate: the worst case is a duplicate line.
+            static bool s_firstCall = true;
+            if (s_firstCall)
+            {
+                s_firstCall = false;
+                LOG("friendly: incremental trust path reached (group=%u, delta=%lld).",
+                    group, static_cast<long long>(delta));
+            }
+
             const State& st = State::Get();
             // The engine early-outs on delta <= 0 without writing; leave those.
             if (delta > 0 && st.trustMult && st.trustMultVal > 1.0f)
