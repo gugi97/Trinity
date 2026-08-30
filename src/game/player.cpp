@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 #include <atomic>
+#include <cstdarg>
 #include <cstdint>
 #include <iterator>
 
@@ -19,6 +20,7 @@ namespace trinity::game
     using mem::Read64;
     using mem::Read32;
     using mem::Read8;
+    using mem::ReadPtr;
     using mem::Write64;
 
     namespace
@@ -624,13 +626,13 @@ namespace trinity::game
     void Player::RefreshSelf()
     {
         // Skip the per-frame character-list walk when nothing consumes its
-        // output. Clear the sets once on the active->idle edge so a re-enable
-        // can never pin a stale/freed entry for the one frame before the next
-        // resolve repopulates; the missed frame is harmless (a re-enabled pin
-        // just starts one tick later).
+        // output. The open menu is also a consumer: Edit Equipment needs the
+        // companion roster even when every stat cheat is off. Clear the sets
+        // once on the active->idle edge so a re-enable can never pin a stale/
+        // freed entry for the one frame before the next resolve repopulates.
         static bool s_wasActive = false;
         const State& st = State::Get();
-        if (!AnyStatFeatureActive(st))
+        if (!AnyStatFeatureActive(st) && !st.menuOpen)
         {
             if (s_wasActive) { ClearPlayerSets(); s_wasActive = false; }
             return;
@@ -707,6 +709,39 @@ namespace trinity::game
         if (idx < 0 || idx >= CharacterCount()) return 0;
         const uintptr_t o = g_owners[idx].load(std::memory_order_acquire);
         return (o >= kMinPointer) ? o : 0;
+    }
+
+    // The playable roster is fixed and ordered, so the index IS the
+    // identity - no lookup needed. Confirmed independently by
+    // ReXooGen/Trinity, whose dye and equipment code both assert the same
+    // order (0 = Kliff, 1 = Damiane, 2 = Oongka).
+    //
+    // This replaces a walk through a "mercenary roster map" hung off the
+    // actor component array. That walk resolved nothing on TU 2.00.01: the
+    // component pointer came back as 6D000001C0 and FFFF000000000000, and
+    // the map behind it as FEFEFEFEFEFEFEFE - debug fill, not a map. The
+    // offsets were guesses and every index failed, so the selector showed
+    // "Character 1..4" anyway while logging a dozen warnings per session.
+    //
+    // CharacterCount() can report more entries than the roster has names
+    // for; those keep the generic label rather than borrowing a wrong one.
+    bool Player::CharacterName(int idx, char* out, size_t outSize)
+    {
+        if (!out || outSize == 0) return false;
+        out[0] = '\0';
+
+        static const char* const kRoster[] = { "Kliff", "Damiane", "Oongka" };
+        if (idx < 0 || idx >= static_cast<int>(std::size(kRoster))) return false;
+
+        // A slot with no live owner is not this character - say nothing
+        // rather than name an empty row.
+        if (CharacterOwner(idx) < kMinPointer) return false;
+
+        const char* const name = kRoster[idx];
+        const size_t n = strlen(name);
+        if (n + 1 > outSize) return false;
+        memcpy(out, name, n + 1);
+        return true;
     }
 
     bool Player::IsTrackedCharacter(uintptr_t owner)

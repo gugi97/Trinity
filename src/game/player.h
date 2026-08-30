@@ -63,6 +63,13 @@ namespace trinity::game
         static int       CharacterCount();
         static uintptr_t CharacterOwner(int idx);
 
+        // Try to resolve a display name for the character at `idx`. On success
+        // `out` receives a UTF-8 null-terminated name (up to outSize bytes);
+        // on failure `out` is left empty and the caller should fall back to
+        // a generic label. Reads are guarded, so a stale pointer or a shifted
+        // patch just returns false instead of crashing.
+        static bool      CharacterName(int idx, char* out, size_t outSize);
+
         // True if `owner` is one of the characters above. The equipment editor
         // holds an index across frames, and the set can shrink under it.
         static bool      IsTrackedCharacter(uintptr_t owner);

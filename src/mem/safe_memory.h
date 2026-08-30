@@ -125,4 +125,5 @@ namespace trinity::mem
         if (!ReadPtr(obj, &cstr) || cstr < game::kMinPointer) return false;
         return ReadCString(cstr, out, n);
     }
+
 }

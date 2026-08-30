@@ -51,32 +51,18 @@ namespace trinity::game
                     if (st.gameSpeed)
                     {
                         const float mult = Clamp(st.gameSpeedMult, 0.1f, 5.0f);
-                        Write8(timeMgr + 0x50, 1);
-                        Write32(timeMgr + 0x54, FloatBits(mult));
+                        Write8(timeMgr + kOff_TimeMgr_Mode, 1);
+                        Write32(timeMgr + kOff_TimeMgr_Multiplier, FloatBits(mult));
                     }
                     else
                     {
-                        Write8(timeMgr + 0x50, 0);
-                        Write32(timeMgr + 0x54, FloatBits(1.0f));
+                        Write8(timeMgr + kOff_TimeMgr_Mode, 0);
+                        Write32(timeMgr + kOff_TimeMgr_Multiplier, FloatBits(1.0f));
                     }
                 }
             }
             oMasterFrameUpdate(ctx);
         }
-
-        // Resolved addresses of the fixed-timestep override globals (BSS - zero
-        // in the static image, so found via the override block's RIP operands).
-        // Zero if the signature did not resolve, in which case Game Speed is
-        // inert (Tick no-ops).
-        uintptr_t g_flagAddr  = 0; // byte  byte_606B9CE : 1 forces the fixed step
-        uintptr_t g_valueAddr = 0; // float dword_615A4F0 : forced seconds-per-frame
-        uintptr_t g_speedPatchAddr = 0;
-        uint8_t   g_speedOrigBytes[9] = {};
-
-        // Whether we currently hold the override on. Lets Tick clear the flag
-        // exactly once when the toggle is switched off, restoring the engine's
-        // own real-time delta without fighting the game every frame afterwards.
-        bool g_applied = false;
 
         // Master field-clock globals (client / server realm), each the base of
         // a 32-byte int32 time struct (day/hour/min/sec). Zero if the signature
@@ -194,55 +180,21 @@ namespace trinity::game
     {
         bool ok = true;
 
+        // The only Game Speed path. It sets the engine's own time scale -
+        // mode byte at +0x50, multiplier float at +0x54 on the time manager
+        // hanging off ctx+0x60 - which the engine then applies itself at
+        // 0x1409481F9 (`vmulss xmm0, xmm1, [rax+0x64]`). Nothing else here
+        // touches the frame delta any more; see the note in Tick.
         if (mem::InstallHook("world: master frame update", kSig_MasterFrameUpdate,
-                             "Game Speed timescale unavailable",
+                             "Game Speed disabled",
                              reinterpret_cast<void*>(hkMasterFrameUpdate),
                              reinterpret_cast<void**>(&oMasterFrameUpdate),
                              &g_masterFrameTarget, 1))
         {
             LOG("world: master frame update hook installed @ %p - Game Speed ready.", g_masterFrameTarget);
         }
-
-        const uintptr_t m = mem::FindPattern(kSig_GameSpeed);
-        const size_t gameSpeedMatches = mem::CountMatches(kSig_GameSpeed, 2);
-        if (!m || gameSpeedMatches != 1)
-        {
-            LOG_ERR("world: game-speed signature %s - Game Speed disabled.",
-                    m ? "ambiguous" : "NOT FOUND");
-            ok = false;
-        }
         else
-        {
-            // Flag: disp32 of `cmp cs:byte_606B9CE, 1` (an imm follows the disp,
-            // so resolve from the explicit disp/next-instr rather than ResolveRipAt).
-            g_flagAddr = mem::ResolveRip(m + kOff_GameSpeed_FlagDisp, m + kOff_GameSpeed_FlagEnd);
-            // Value: `vmovss xmm0, cs:dword_615A4F0` - a standard RIP instr (disp
-            // at its tail), so ResolveRipAt handles it.
-            g_valueAddr = mem::ResolveRipAt(m + kOff_GameSpeed_ValueVmovss, kLen_GameSpeed_Vmovss);
-
-            if (g_flagAddr < kMinPointer || g_valueAddr < kMinPointer)
-            {
-                LOG_ERR("world: game-speed globals resolved out of range - Game Speed disabled.");
-                g_flagAddr = g_valueAddr = 0;
-                ok = false;
-            }
-            else
-            {
-                // Patch the one-shot conditional check in the override block (offset +28)
-                // so forced delta applies continuously on every sub-tick.
-                g_speedPatchAddr = m + 28;
-                memcpy(g_speedOrigBytes, reinterpret_cast<const void*>(g_speedPatchAddr), sizeof(g_speedOrigBytes));
-                DWORD oldProt = 0;
-                if (VirtualProtect(reinterpret_cast<void*>(g_speedPatchAddr), sizeof(g_speedOrigBytes), PAGE_EXECUTE_READWRITE, &oldProt))
-                {
-                    memset(reinterpret_cast<void*>(g_speedPatchAddr), 0x90, sizeof(g_speedOrigBytes));
-                    VirtualProtect(reinterpret_cast<void*>(g_speedPatchAddr), sizeof(g_speedOrigBytes), oldProt, &oldProt);
-                    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(g_speedPatchAddr), sizeof(g_speedOrigBytes));
-                }
-                else
-                    g_speedPatchAddr = 0;
-            }
-        }
+            ok = false;
 
         // Time of Day resolves independently - Game Speed still works if this
         // signature drifts, and vice versa. Advance needs the clock globals...
@@ -292,33 +244,20 @@ namespace trinity::game
     {
         const State& st = State::Get();
 
-        // Game Speed - only if its globals resolved; independent of the sun
-        // freeze below, so a Game Speed signature drift never disables Freeze.
-        if ((g_flagAddr && g_valueAddr) && st.gameSpeed)
-        {
-            // Forced frame delta = mult / 60: the engine's own fixed-timestep
-            // reference is the 60-FPS step (1/60 s), so 1.00x reproduces it and
-            // the multiplier scales sim time from there. Clamp both the factor
-            // (to the slider's range) and the resulting delta (defensively, so a
-            // bad value can never feed the sim an absurd timestep).
-            const float mult  = Clamp(st.gameSpeedMult, 0.1f, 5.0f);
-            const float delta = Clamp(mult / kGameSpeed_BaselineFps, 1.0e-5f, 1.0f);
-
-            // Value first, then arm both flags (flag 1 = fixed step, flag 2 = high delta / fast step),
-            // so the timing update never reads a stale delta on the frame we switch it on.
-            // Re-armed every tick so it self-heals if the game clears the flag.
-            Write32(g_valueAddr, FloatBits(delta));
-            Write8(g_flagAddr, 1);
-            Write8(g_flagAddr + 1, 1);
-            g_applied = true;
-        }
-        else if (g_applied)
-        {
-            // Back to the engine's own measured real-time delta.
-            Write8(g_flagAddr, 0);
-            Write8(g_flagAddr + 1, 0);
-            g_applied = false;
-        }
+        // Game Speed is NOT applied here. It rides hkMasterFrameUpdate,
+        // which sets the engine's own time-scale fields before the frame is
+        // stepped.
+        //
+        // What used to live here was a second, older mechanism: force the
+        // frame delta to mult/60 through a pair of BSS globals and NOP the
+        // engine's one-shot guard so it re-applied every frame. Both wrote
+        // the SAME field - [timeMgr+0x64] - inside the SAME function, and the
+        // forced write sits LATER in it (0x1409482DD) than the engine's own
+        // scaling (0x1409481F9), so the override silently overwrote the
+        // multiplier every frame. That is the "Game Speed is stuck around
+        // 0.75x and the slider does nothing" report: 1/60 s per frame is a
+        // FIXED step, so the world ran at 60/actual-fps regardless of the
+        // slider. Deleting it also retires a runtime code patch.
 
         // Freeze Time of Day: the field-time tick hook (hkFieldTimeTick) holds
         // the NUMERIC clock, but the visible SUN rides the render manager's own
@@ -356,26 +295,6 @@ namespace trinity::game
 
     void World::Remove()
     {
-        // Leave the game at normal speed on unload.
-        if (g_applied && g_flagAddr)
-        {
-            Write8(g_flagAddr, 0);
-            Write8(g_flagAddr + 1, 0);
-        }
-        if (g_speedPatchAddr)
-        {
-            DWORD oldProt = 0;
-            if (VirtualProtect(reinterpret_cast<void*>(g_speedPatchAddr), sizeof(g_speedOrigBytes), PAGE_EXECUTE_READWRITE, &oldProt))
-            {
-                memcpy(reinterpret_cast<void*>(g_speedPatchAddr), g_speedOrigBytes, sizeof(g_speedOrigBytes));
-                VirtualProtect(reinterpret_cast<void*>(g_speedPatchAddr), sizeof(g_speedOrigBytes), oldProt, &oldProt);
-                FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(g_speedPatchAddr), sizeof(g_speedOrigBytes));
-            }
-            g_speedPatchAddr = 0;
-        }
-        g_applied  = false;
-        g_flagAddr = g_valueAddr = 0;
-
         // Restore the render manager's time-of-day limits if we were holding
         // the sun, then forget the engine global.
         if (g_todClampApplied)
@@ -402,7 +321,7 @@ namespace trinity::game
 
     bool World::Ready()
     {
-        return g_masterFrameTarget != nullptr || (g_flagAddr >= kMinPointer && g_valueAddr >= kMinPointer);
+        return g_masterFrameTarget != nullptr;
     }
 
     bool World::TimeOfDayReady()

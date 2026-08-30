@@ -92,6 +92,11 @@ namespace trinity::game
         // that made up most of the log before.
         constexpr int kDetailBudget = 60;
 
+        // TU 2.00.01: return address immediately after the NPC gameplay
+        // dispatcher calls the +0x18-map setter. Area-load/sync records arrive
+        // from +0x2507110 instead and must only seed the cache.
+        constexpr uintptr_t kNpcGameplayCaller_20001 = 0x239BD3F;
+
         int           g_detailLeft  = kDetailBudget;
 
         // Call with g_cacheMx held.
@@ -175,30 +180,44 @@ namespace trinity::game
                 auto itBase = g_lastVal.find(ckBase);
                 if (itBase == g_lastVal.end())
                 {
-                    // First sight of this relationship, with no group baseline
-                    // either: SEED it and pass it through untouched.
-                    //
-                    // This used to fall through with oldVal = 0 and scale, which
-                    // is the Trust Multiplier bug. The key == 0 baseline write
-                    // the comment above describes does not actually happen in TU
-                    // 2.00.00 - a 2h session log holds ~250 of these and every
-                    // single one reads "0 -> 100", i.e. not one baseline was ever
-                    // recorded. And they were not gifts: the records arrive in
-                    // bursts on area load (15 inside one second right after a
-                    // warp), which is the engine pushing each nearby NPC stored
-                    // trust into the map. Treating that as a gain from zero
-                    // multiplied the save file itself, and every relationship in
-                    // range jumped straight to the cap.
-                    //
-                    // Seeding makes the FIRST write we see the baseline and the
-                    // second - an actual gift or greet - the thing that scales,
-                    // which is what the design intended all along.
-                    ++g_seeded;
-                    Detail("seed  ", map, group, key, 0, newVal, from);
-                    g_lastVal[ckLive] = newVal;
-                    return;
+                    // A newly-created relationship has no load/sync baseline.
+                    // The caller identifies it as a real gameplay gain, so its
+                    // pre-write value is zero and the first greet/gift should
+                    // be multiplied rather than swallowed as a seed.
+                    if (mapId == 0 && from == kNpcGameplayCaller_20001)
+                    {
+                        oldVal = 0;
+                    }
+                    else
+                    {
+                        // First sight of this relationship, with no group baseline
+                        // either: SEED it and pass it through untouched.
+                        //
+                        // This used to fall through with oldVal = 0 and scale, which
+                        // is the Trust Multiplier bug. The key == 0 baseline write
+                        // the comment above describes does not actually happen in TU
+                        // 2.00.00 - a 2h session log holds ~250 of these and every
+                        // single one reads "0 -> 100", i.e. not one baseline was ever
+                        // recorded. And they were not gifts: the records arrive in
+                        // bursts on area load (15 inside one second right after a
+                        // warp), which is the engine pushing each nearby NPC stored
+                        // trust into the map. Treating that as a gain from zero
+                        // multiplied the save file itself, and every relationship in
+                        // range jumped straight to the cap.
+                        //
+                        // Seeding makes the FIRST write we see the baseline and the
+                        // second - an actual gift or greet - the thing that scales,
+                        // which is what the design intended all along.
+                        ++g_seeded;
+                        Detail("seed  ", map, group, key, 0, newVal, from);
+                        g_lastVal[ckLive] = newVal;
+                        return;
+                    }
                 }
-                oldVal = itBase->second;
+                else
+                {
+                    oldVal = itBase->second;
+                }
             }
 
             const State& st = State::Get();

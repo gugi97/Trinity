@@ -1271,28 +1271,22 @@ namespace trinity::game
     // (sub_34B3950 / sub_3635600) clears it. Nothing in the frame loop clears
     // the flag, so writing it ourselves sticks (live-confirmed by the user).
     //
-    // Repurposed as Game Speed: forcing a larger delta advances more sim-time
-    // per frame (faster); a smaller one is slow-motion. We drive the multiplier
-    // relative to the engine's own 60 FPS reference (dword_615A4F0 = mult/60).
+    // Game Speed is the engine's OWN time scale, set on the time manager
+    // that hangs off the master frame update's ctx+0x60: a mode byte at
+    // +0x50 (1 = scaled) and a multiplier float at +0x54. The engine reads
+    // both at 0x1409481CE/0x1409481D7 and applies them itself:
+    //     vmulss xmm0, xmm1, [rax+0x64]   ; 0x1409481F9, the frame delta
+    //     vmulss xmm0, xmm1, [rax+0x68]   ; 0x140948207, and its partner
+    // so world.cpp only has to write the two fields - see hkMasterFrameUpdate.
     //
-    // Both globals are BSS (zero in the static dump), so they are located by a
-    // signature over the override block and resolved from its RIP operands:
-    //   match+2 : disp32 of `cmp cs:byte_606B9CE, 1`  (flag; next instr +7)
-    //   match+37: `vmovss xmm0, cs:dword_615A4F0`     (value; 8-byte instr)
-    // IDB match at 0x8FC348. Unique block.
-    inline constexpr const char* kSig_GameSpeed =
-        "80 3D ?? ?? ?? ?? 01 75 ?? 48 8B 4F ?? 41 8B C7 C5 78 2F 61 64 0F 97 C0 "
-        "85 C0 74 ?? 80 3D ?? ?? ?? ?? 01 75 ?? C5 FA 10 05 ?? ?? ?? ?? C5 FA 11 "
-        "41 64 C6 05 ?? ?? ?? ?? 00";
-    inline constexpr uintptr_t kOff_GameSpeed_FlagDisp    = 2;  // disp32 of cmp cs:byte_606B9CE,1
-    inline constexpr uintptr_t kOff_GameSpeed_FlagEnd     = 7;  // next-instr addr for that cmp
-    inline constexpr uintptr_t kOff_GameSpeed_ValueVmovss = 37; // vmovss xmm0,cs:dword_615A4F0
-    inline constexpr int       kLen_GameSpeed_Vmovss      = 8;  // that vmovss is 8 bytes (disp at end)
-    // Engine fixed-timestep reference: cs:Y (1.0f) / target fps (dword_5E379E0,
-    // default 60.0f) => baseline delta 1/60. A 1.00x multiplier over this is the
-    // 60-FPS-equivalent step; see World::Tick.
-    inline constexpr float     kGameSpeed_BaselineFps     = 60.0f;
-
+    // There is no signature here on purpose. The older approach forced the
+    // delta directly through two BSS globals located by a pattern over the
+    // engine's own override block, and NOP-patched that block's one-shot
+    // guard. It resolved correctly on 2658 and was still wrong: it wrote
+    // [timeMgr+0x64] LATER in the same function than the scaling above, so
+    // it overwrote the multiplier with a fixed 1/60 s step every frame.
+    inline constexpr uintptr_t kOff_TimeMgr_Mode       = 0x50; // u8: 1 = scaled
+    inline constexpr uintptr_t kOff_TimeMgr_Multiplier = 0x54; // f32
     // --- Time of Day: the master field clock (World feature, world.cpp) -------
     // The REAL day/night clock is two BSS globals (client / server realm), each
     // a 32-byte struct of int32s. The per-frame sun/sky update reads them (IDB

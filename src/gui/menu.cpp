@@ -459,8 +459,17 @@ namespace trinity::gui
         for (int i = 0; i < count; ++i)
         {
             const uintptr_t o = game::Player::CharacterOwner(i);
-            snprintf(s_names[i], sizeof(s_names[i]), "Character %d%s", i + 1,
-                     (o && o == controlled) ? " (you)" : "");
+            char resolved[64] = {};
+            if (game::Player::CharacterName(i, resolved, sizeof(resolved)))
+            {
+                snprintf(s_names[i], sizeof(s_names[i]), "%s%s", resolved,
+                         (o && o == controlled) ? " (you)" : "");
+            }
+            else
+            {
+                snprintf(s_names[i], sizeof(s_names[i]), "Character %d%s", i + 1,
+                         (o && o == controlled) ? " (you)" : "");
+            }
             s_ptrs[i] = s_names[i];
             // No target set means the controlled body, so point the selector at
             // whichever row that is rather than defaulting to row 0.
