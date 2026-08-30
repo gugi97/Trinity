@@ -820,6 +820,29 @@ namespace trinity::hooks
 
         ImGui::Render();
 
+        // Nothing on screen? Stop here.
+        //
+        // With the menu closed, no toast up and the FPS counter off, ImGui
+        // produces an empty draw list - but everything below ran anyway, every
+        // frame: a fence wait, an allocator and command list reset, two render
+        // passes recorded, and an ExecuteCommandLists submission, all to
+        // composite nothing onto the back buffer. That is a constant tax on a
+        // player who is simply playing the game with the mod installed.
+        //
+        // The fence wait is the worst of it: it blocks the render thread until
+        // the GPU has finished with the frame that used this back buffer, so it
+        // can stall the caller outright rather than merely adding work.
+        //
+        // The ImGui frame itself stays - it is CPU-only, it is what decides
+        // whether there is anything to draw, and skipping NewFrame/Render would
+        // desynchronise the state machine that answers the question.
+        const ImDrawData* drawData = ImGui::GetDrawData();
+        if (!drawData || drawData->TotalVtxCount == 0)
+        {
+            submitQueue->Release();
+            return;
+        }
+
         const UINT idx = swapChain->GetCurrentBackBufferIndex();
         if (idx >= g_frames.size() || !g_frames[idx].renderTarget)
         {
