@@ -1794,6 +1794,36 @@ namespace trinity::game
     inline constexpr const char* kSig_FriendlyAddDelta =
         "66 44 89 44 24 18 55 53 57 41 56 41 57 48 8D 6C 24 ? 48 81 EC ? ? ? ? "
         "4C 89 CF 41 0F B7 D8 49 89 D6 49 89 CF 4D 85 C9";
+    // DIAGNOSTIC ONLY - a probe, not a feature.
+    //
+    // A full session with the delta accumulator hooked produced not one
+    // "incremental trust path reached" line while the player greeted NPCs
+    // repeatedly, so greet does not reach 0x14D6F3350 either. Both known
+    // write paths are therefore ruled out, and the remaining candidate is
+    // this higher-level relationship writer, which is the one place found
+    // so far that both resolves a record through the map-find helper
+    // 0x14031BBF0 (at 0x141BE1432) and reads the TLS realm flag
+    // gs:[0x58] (at 0x141BE14CC) - i.e. it behaves like something that
+    // updates a relationship in the authoritative realm.
+    //
+    // __fastcall(void* self, void* a2, uint16_t group, uint32_t value):
+    //   0x141BE13E2  mov esi, r9d   - value/delta taken as 32-bit here,
+    //                                 unlike the accumulator which reads
+    //                                 the full 64-bit r9
+    //   0x141BE13E5  mov r12, rdx
+    //   0x141BE13E8  mov r13, rcx
+    //
+    // Trinity only OBSERVES it. Whether r9d is a delta or an absolute
+    // value is exactly what the probe is there to answer, and guessing
+    // wrong while writing would corrupt a relationship.
+    //
+    // The frame bytes are wildcarded but nothing before them is: an almost
+    // identical function at 0x14275ADE0 shares this whole prologue and
+    // differs ONLY in the frame, so widening any further merges the two.
+    // Verified: exactly one match in 2658, at 0x141BE13C0.
+    inline constexpr const char* kSig_FriendlyHiWriter =
+        "48 89 5C 24 10 66 44 89 44 24 18 55 56 57 41 54 41 55 41 56 41 57 "
+        "48 8D 6C 24 ? 48 81 EC ? ? ? ? 41 8B F1 4C 8B E2 4C 8B E9 48 8B 01";
     inline constexpr uintptr_t kOff_FriendlyRec_Key   = 0x00; // u32 record key
     inline constexpr uintptr_t kOff_FriendlyRec_Group = 0x04; // u16 group/bucket key
     inline constexpr uintptr_t kOff_FriendlyRec_Value = 0x20; // i64 trust value

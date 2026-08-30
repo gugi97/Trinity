@@ -47,6 +47,12 @@ namespace trinity::game
         TrustAdd_t oTrustAdd   = nullptr;
         void*      g_addTarget = nullptr;
 
+        // Probe only - see kSig_FriendlyHiWriter. Observes, never writes.
+        using TrustWrite_t = void*(__fastcall*)(void* self, void* a2,
+                                                uint16_t group, uint32_t value);
+        TrustWrite_t oHiWriter   = nullptr;
+        void*        g_hiTarget  = nullptr;
+
         // Last trust value we let through, per relationship. The setter writes an
         // absolute value, so we scale the increase over what we last allowed for
         // that (map, group, key) - a stable per-gift/feed multiplier. Keyed so an
@@ -285,6 +291,18 @@ namespace trinity::game
             }
             return oTrustAdd(rel, status, group, delta);
         }
+
+        void* __fastcall hkHiWriter(void* self, void* a2,
+                                    uint16_t group, uint32_t value)
+        {
+            {
+                std::lock_guard<std::mutex> lk(g_cacheMx);
+                Detail("WRITER", "hi-lvl", group, 0,
+                       static_cast<int64_t>(value), static_cast<int64_t>(value));
+                g_lastRec = GetTickCount64();
+            }
+            return oHiWriter(self, a2, group, value);
+        }
     }
 
     bool Friendly::Install()
@@ -302,7 +320,17 @@ namespace trinity::game
                                           kSig_FriendlyAddDelta,
                                           "greet/feed Trust Multiplier disabled",
                                           &hkTrustAdd, &oTrustAdd, &g_addTarget);
-        return npc || pet || add;
+        // InstallHook is silent on success everywhere else, which left a
+        // silent log genuinely ambiguous: hook missing, or hook present and
+        // never called? These two say which, and cost one line each.
+        if (add) LOG("friendly: incremental path hooked - greet/feed will scale.");
+
+        const bool hi = mem::InstallHook("friendly: relationship writer probe",
+                                         kSig_FriendlyHiWriter,
+                                         "greet/feed diagnosis unavailable",
+                                         &hkHiWriter, &oHiWriter, &g_hiTarget);
+        if (hi) LOG("friendly: relationship writer probe armed (observe only).");
+        return npc || pet || add || hi;
     }
 
     void Friendly::Remove()
@@ -310,6 +338,7 @@ namespace trinity::game
         mem::RemoveHook(&g_npcTarget);
         mem::RemoveHook(&g_petTarget);
         mem::RemoveHook(&g_addTarget);
+        mem::RemoveHook(&g_hiTarget);
         std::lock_guard<std::mutex> lk(g_cacheMx);
         g_lastVal.clear();
         g_seeded = g_scaled = g_reverted = g_passed = g_gains = 0;
@@ -343,7 +372,7 @@ namespace trinity::game
 
     bool Friendly::Ready()
     {
-        return g_npcTarget != nullptr || g_petTarget != nullptr ||
+return g_npcTarget != nullptr || g_petTarget != nullptr ||
                g_addTarget != nullptr;
     }
 }
