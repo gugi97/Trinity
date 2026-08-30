@@ -24,14 +24,28 @@ namespace trinity::game
     {
         // The two leaf trust-record setters. Both take the destination map owner
         // in rcx and the SOURCE 0x58-byte record in rdx, and copy the record into
-        // the matching slot. Every trust write - gift, feed, AI, save-load, sync
-        // - funnels through one of these (live-confirmed: an NPC trust write
-        // broke at 0xDBE114F inside setNpc). See offsets.h (kSig_FriendlySet*).
+        // the matching slot. These carry the writes that REPLACE a whole record:
+        // gifting, save-load and network sync. They are NOT every trust write -
+        // an incremental gain (greet, dialogue, petting, feeding, taming) never
+        // builds a record and goes through the delta accumulator below instead.
+        // See offsets.h (kSig_FriendlySet* and kSig_FriendlyAddDelta).
         using FriendlySet_t = void*(__fastcall*)(void* mapOwner, void* record);
         FriendlySet_t oSetNpc = nullptr;
         FriendlySet_t oSetPet = nullptr;
         void* g_npcTarget = nullptr;
         void* g_petTarget = nullptr;
+
+        // The incremental path, and the one that carries greet, dialogue
+        // rewards, petting, feeding and wild taming. It takes a raw delta gain
+        // rather than a built record, so multiplying that delta is the whole
+        // fix: the engine does its own clamp to kFriendly_Max and its own tier
+        // advance on the result. No cache, no baseline, no first-sight problem
+        // - unlike ScaleRecord, which can only infer a gain by diffing against
+        // the last value it happened to see.
+        using TrustAdd_t = void*(__fastcall*)(void* rel, uint32_t* status,
+                                              uint16_t group, int64_t delta);
+        TrustAdd_t oTrustAdd   = nullptr;
+        void*      g_addTarget = nullptr;
 
         // Last trust value we let through, per relationship. The setter writes an
         // absolute value, so we scale the increase over what we last allowed for
@@ -57,6 +71,7 @@ namespace trinity::game
         int      g_scaled   = 0; // multiplied
         int      g_reverted = 0; // came back LOWER than what we had written
         int      g_passed   = 0; // seen before, and we changed nothing
+        int      g_gains    = 0; // incremental gains multiplied (greet/feed)
         uint64_t g_lastRec  = 0; // GetTickCount64() of the most recent record
 
         // Per-record detail, for when the summary is not enough.
@@ -77,13 +92,13 @@ namespace trinity::game
         int           g_detailLeft  = kDetailBudget;
 
         // Call with g_cacheMx held.
-        void Detail(const char* what, uint32_t mapId, uint16_t group, uint32_t key,
+        void Detail(const char* what, const char* map, uint16_t group, uint32_t key,
                     int64_t oldVal, int64_t newVal)
         {
             if (g_detailLeft <= 0) return;
             --g_detailLeft;
             LOG("friendly/detail: %s map=%s group=%u key=%u %lld -> %lld%s",
-                what, mapId ? "pet" : "npc", group, key,
+                what, map, group, key,
                 static_cast<long long>(oldVal), static_cast<long long>(newVal),
                 (g_detailLeft == 0) ? " (detail budget spent; summaries only from here)" : "");
         }
@@ -114,6 +129,7 @@ namespace trinity::game
             // uninitialised insert) so we never write garbage into the record.
             if (newVal < 0 || newVal > kFriendly_Max) return;
 
+            const char* const map = mapId ? "pet" : "npc";
             const uint64_t base   = (static_cast<uint64_t>(mapId) << 48) |
                                     (static_cast<uint64_t>(group) << 32);
             const uint64_t ckBase = base;        // key == 0: the persisted baseline
@@ -167,7 +183,7 @@ namespace trinity::game
                     // second - an actual gift or greet - the thing that scales,
                     // which is what the design intended all along.
                     ++g_seeded;
-                    Detail("seed  ", mapId, group, key, 0, newVal);
+                    Detail("seed  ", map, group, key, 0, newVal);
                     g_lastVal[ckLive] = newVal;
                     return;
                 }
@@ -184,14 +200,14 @@ namespace trinity::game
                 if (s != newVal && Write64(r + kOff_FriendlyRec_Value, s))
                 {
                     ++g_scaled;
-                    Detail("SCALED", mapId, group, key, oldVal, s);
+                    Detail("SCALED", map, group, key, oldVal, s);
                     return;
                 }
                 // A gain we recognised but did not change: either the
                 // multiplier worked out to the same number, or the write was
                 // refused. Worth a line - it is a different failure from never
                 // seeing the gain at all.
-                Detail("nowrite", mapId, group, key, oldVal, newVal);
+                Detail("nowrite", map, group, key, oldVal, newVal);
             }
             else if (on)
             {
@@ -200,7 +216,7 @@ namespace trinity::game
                 // the value did not go up (a resync or an idle re-push), or the
                 // relationship is already at the cap.
                 Detail(oldVal >= kFriendly_Max ? "at-max " : "no-gain",
-                       mapId, group, key, oldVal, newVal);
+                       map, group, key, oldVal, newVal);
             }
 
             // Falling through with a value BELOW what we last allowed means
@@ -226,6 +242,32 @@ namespace trinity::game
             ScaleRecord(record, 1);
             return oSetPet(mapOwner, record);
         }
+
+        void* __fastcall hkTrustAdd(void* rel, uint32_t* status,
+                                    uint16_t group, int64_t delta)
+        {
+            const State& st = State::Get();
+            // The engine early-outs on delta <= 0 without writing; leave those.
+            if (delta > 0 && st.trustMult && st.trustMultVal > 1.0f)
+            {
+                const double scaled = static_cast<double>(delta) *
+                                      static_cast<double>(st.trustMultVal);
+                // Cap at the trust ceiling: a larger delta cannot do more than
+                // saturate, and this keeps the value far away from overflow.
+                const int64_t out = (scaled >= static_cast<double>(kFriendly_Max))
+                                        ? kFriendly_Max
+                                        : static_cast<int64_t>(scaled + 0.5);
+                if (out > delta)
+                {
+                    std::lock_guard<std::mutex> lk(g_cacheMx);
+                    ++g_gains;
+                    g_lastRec = GetTickCount64();
+                    Detail("GAIN  ", "delta", group, 0, delta, out);
+                    delta = out;
+                }
+            }
+            return oTrustAdd(rel, status, group, delta);
+        }
     }
 
     bool Friendly::Install()
@@ -239,16 +281,21 @@ namespace trinity::game
         const bool pet = mem::InstallHook("friendly: pet trust setter", kSig_FriendlySetPet,
                                           "pet Trust Multiplier disabled",
                                           &hkSetPet, &oSetPet, &g_petTarget);
-        return npc || pet;
+        const bool add = mem::InstallHook("friendly: trust delta accumulator",
+                                          kSig_FriendlyAddDelta,
+                                          "greet/feed Trust Multiplier disabled",
+                                          &hkTrustAdd, &oTrustAdd, &g_addTarget);
+        return npc || pet || add;
     }
 
     void Friendly::Remove()
     {
         mem::RemoveHook(&g_npcTarget);
         mem::RemoveHook(&g_petTarget);
+        mem::RemoveHook(&g_addTarget);
         std::lock_guard<std::mutex> lk(g_cacheMx);
         g_lastVal.clear();
-        g_seeded = g_scaled = g_reverted = g_passed = 0;
+        g_seeded = g_scaled = g_reverted = g_passed = g_gains = 0;
         g_lastRec = 0;
     }
 
@@ -259,7 +306,7 @@ namespace trinity::game
         const uint64_t last = g_lastRec;
         if (!last || GetTickCount64() - last < kFriendlyBurst_QuietMs) return;
 
-        int seeded = 0, scaled = 0, reverted = 0, passed = 0;
+        int seeded = 0, scaled = 0, reverted = 0, passed = 0, gains = 0;
         {
             std::lock_guard<std::mutex> lk(g_cacheMx);
             if (!g_lastRec || GetTickCount64() - g_lastRec < kFriendlyBurst_QuietMs) return;
@@ -267,16 +314,19 @@ namespace trinity::game
             scaled   = g_scaled;
             reverted = g_reverted;
             passed   = g_passed;
-            g_seeded = g_scaled = g_reverted = g_passed = 0;
+            gains    = g_gains;
+            g_seeded = g_scaled = g_reverted = g_passed = g_gains = 0;
             g_lastRec = 0;
         }
-        if (seeded || scaled || reverted || passed)
-            LOG("friendly: %d scaled, %d seeded, %d unchanged, %d reverted.",
-                scaled, seeded, passed, reverted);
+        if (seeded || scaled || reverted || passed || gains)
+            LOG("friendly: %d gain scaled, %d record scaled, %d seeded, "
+                "%d unchanged, %d reverted.",
+                gains, scaled, seeded, passed, reverted);
     }
 
     bool Friendly::Ready()
     {
-        return g_npcTarget != nullptr || g_petTarget != nullptr;
+        return g_npcTarget != nullptr || g_petTarget != nullptr ||
+               g_addTarget != nullptr;
     }
 }

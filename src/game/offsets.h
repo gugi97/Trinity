@@ -1756,6 +1756,44 @@ namespace trinity::game
         "4C 8B DC 53 55 56 57 41 56 48 83 EC 60 48 8B FA 48 8D 69 38 "
         "0F B7 42 04 66 41 89 43 08";
 
+    // The OTHER trust write path, and the one that actually carries greet,
+    // dialogue rewards, petting, feeding and wild taming. The two setters
+    // above are a record REPLACEMENT pipeline: they take a fully-built
+    // 0x58-byte record and copy it into the map, which is what a gift and
+    // the save/network sync do. An incremental gain never builds a record -
+    // it hands a raw delta to this accumulator instead, so it was invisible
+    // to the hooks above and greet/feed multiplied nothing. That is the
+    // "Trust Multiplier is not working" report; gift always worked.
+    //
+    // Which path an interaction takes is decided at 0x14239BC73:
+    //     cmp byte ptr [rdi+0x8A], 0
+    //     jne 0x14239BD1B          ; set -> full record -> the setters (GIFT)
+    //     ...
+    //     mov r9, qword ptr [rdi+0x20]   ; clear -> raw delta gain
+    //     call 0x141BDDB00               ; -> this function (GREET / FEED)
+    //
+    // __fastcall(void* rel, uint32_t* status, uint16_t group, int64_t delta):
+    //   rcx  relationship object - u32 tier at +0x00, i64 trust at +0x08
+    //   rdx  status/result out-pointer (also the return value)
+    //   r8w  group id
+    //   r9   the delta gain, and the only thing a multiplier needs to touch
+    //
+    // r9 being the gain is not inferred - the function early-outs on it:
+    //     0x14D6F3376  test r9, r9
+    //     0x14D6F3379  jg   0x14D6F3388    ; <=0 returns a status, writes nothing
+    // and it clamps to 100 and advances the tier itself, so scaling the delta
+    // needs no cache, no baseline and no clamp of our own.
+    //
+    // Body lives in .sbss behind a 5-byte E9 trampoline at 0x141BDDB00, same
+    // shape as kSig_FriendlySetNpc_20001. All FOUR call sites in 2658 go
+    // through that trampoline and none reaches the body directly, so hooking
+    // the body covers every one: 0x14239BCE0 and 0x14239BEC8 (NPC greet and
+    // dialogue), 0x14250D58E (mount), 0x1405244A9 (wild animal feed/tame).
+    // Frame size and the rbp lea wildcarded; the register moves that define
+    // the ABI are kept. Verified: exactly one match in 2658, at 0x14D6F3350.
+    inline constexpr const char* kSig_FriendlyAddDelta =
+        "66 44 89 44 24 18 55 53 57 41 56 41 57 48 8D 6C 24 ? 48 81 EC ? ? ? ? "
+        "4C 89 CF 41 0F B7 D8 49 89 D6 49 89 CF 4D 85 C9";
     inline constexpr uintptr_t kOff_FriendlyRec_Key   = 0x00; // u32 record key
     inline constexpr uintptr_t kOff_FriendlyRec_Group = 0x04; // u16 group/bucket key
     inline constexpr uintptr_t kOff_FriendlyRec_Value = 0x20; // i64 trust value
