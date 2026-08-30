@@ -264,6 +264,12 @@ namespace trinity::game
         // accumulator - so pin its clamp here to hold the sun too. Force
         // lower == upper == the captured hour every tick while frozen; the
         // engine clamps currentTimeOfDay to it (real time keeps flowing).
+        // Resolve nothing unless there is a reason to. ResolveTodManager is two
+        // guarded pointer reads, and this runs on the game thread every single
+        // frame - so with Freeze Time off (and no clamp of ours left to undo)
+        // it was pure per-frame cost for a value nobody then used.
+        if (!st.timeFrozen && !g_todClampApplied) return;
+
         const uintptr_t mgr = ResolveTodManager();
         if (st.timeFrozen && mgr)
         {

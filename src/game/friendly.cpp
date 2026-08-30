@@ -283,10 +283,16 @@ g_seeded = g_scaled = g_reverted = g_passed = g_gains = 0;
             g_seeded = g_scaled = g_reverted = g_passed = g_gains = 0;
             g_lastRec = 0;
         }
-        if (seeded || scaled || reverted || passed || gains)
-            LOG("friendly: %d trust gain(s) multiplied, %d relationship(s) "
-                "recorded, %d unchanged, %d reverted to the stored value.",
-                gains + scaled, seeded, passed, reverted);
+        // Only speak when the feature DID something. Records arrive in bursts
+        // constantly - walking past NPCs is enough - so reporting every burst
+        // meant a line every few seconds saying nothing happened, which is how
+        // a log stops being read. Seeded and unchanged counts are the normal
+        // resting state, not news; they ride along on a line that had a reason
+        // to exist anyway.
+        if (!gains && !scaled && !reverted) return;
+        LOG("friendly: %d trust gain(s) multiplied%s.",
+            gains + scaled,
+            reverted ? " (some were reverted by the game and will re-scale)" : "");
     }
 
     bool Friendly::Ready()

@@ -1340,11 +1340,8 @@ namespace trinity::game
                             g_warpSequence.load(std::memory_order_acquire) == activeWarp.sequence &&
                             g_warpPending.load(std::memory_order_acquire) == 0)
                         {
-                            LOG("teleport: post-hold generation %u post-hold position %.2f %.2f %.2f",
-                                activeWarp.sequence,
-                                LocalToWorld(postHold.localX, postHold.originX),
-                                LocalToWorld(postHold.localY, postHold.originY),
-                                LocalToWorld(postHold.localZ, postHold.originZ));
+                            // Nothing to say: the warp-complete line below
+                            // reports the landing once, in world space.
                         }
                         uint32_t expectedSequence = activeWarp.sequence;
                         g_postHoldSequence.compare_exchange_strong(
@@ -1353,8 +1350,6 @@ namespace trinity::game
                     if (frames == kWarpHoldFrames)
                     {
                         Player::SetWarpGrace(kWarp_GraceMs);
-                        LOG("teleport: warp applied and velocity zeroed (hold %d frames)",
-                            kWarpHoldFrames);
                     }
                     if (frames == 1)
                     {
@@ -1363,17 +1358,16 @@ namespace trinity::game
                         if (ReadVec3(owner + kOff_MoveOwner_Position, finalLocal) &&
                             ReadLiveOrigin(finalOrigin))
                         {
-                            LOG("teleport: warp complete target-world %.2f %.2f %.2f live-origin %.2f %.2f %.2f observed-local %.2f %.2f %.2f observed-world %.2f %.2f %.2f",
-                                worldX, worldY, worldZ,
-                                finalOrigin[0], finalOrigin[1], finalOrigin[2],
-                                finalLocal[0], finalLocal[1], finalLocal[2],
+                            LOG("teleport: warped to %.0f %.0f %.0f (asked for %.0f %.0f %.0f).",
                                 LocalToWorld(finalLocal[0], finalOrigin[0]),
                                 LocalToWorld(finalLocal[1], finalOrigin[1]),
-                                LocalToWorld(finalLocal[2], finalOrigin[2]));
+                                LocalToWorld(finalLocal[2], finalOrigin[2]),
+                                worldX, worldY, worldZ);
                         }
                         else
                         {
-                            LOG_WARN("teleport: warp complete target-world %.2f %.2f %.2f; position readback unavailable",
+                            LOG_WARN("teleport: warped to %.0f %.0f %.0f, but the position "
+                                     "could not be read back to confirm it.",
                                      worldX, worldY, worldZ);
                         }
                     }
