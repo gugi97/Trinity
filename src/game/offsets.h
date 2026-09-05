@@ -1795,6 +1795,24 @@ namespace trinity::game
     // dialogue), 0x14250D58E (mount), 0x1405244A9 (wild animal feed/tame).
     // Frame size and the rbp lea wildcarded; the register moves that define
     // the ABI are kept. Verified: exactly one match in 2658, at 0x14D6F3350.
+    // The MOUNT call site of kSig_FriendlyAddDelta, so the multiplier can leave
+    // it alone. Riding gains +1 per tick through this site; scaling it in any
+    // shape kills the game - measured over three separate attempts (inflate the
+    // delta, clamp the resulting total, repeat the call N times), all three
+    // crashed identically at CrimsonDesert.exe+0x374E2E6 on a tagged pointer
+    // inside the mount class. The mount's bond is simply not ours to accelerate.
+    //
+    // Matched rather than baked: the four call sites are documented below as
+    // literal addresses, but a literal is exactly what went stale as
+    // kMountVtableOffset_TU20000 (see player.cpp). This is the call setup
+    // itself - `lea rax,[rbp+X]` / spill / `mov r9,r13` / `movzx r8d,[rsi+0x30]`
+    // / `lea rdx,[rbp+Y]` - with only the two frame displacements wildcarded.
+    // Verified: exactly one match in 2658, at 0x14250D579, whose E8 sits at
+    // +0x15 and therefore returns to +0x1A.
+    inline constexpr const char* kSig_FriendlyMountGainCall =
+        "48 8D 45 ? 48 89 44 24 20 4D 8B CD 44 0F B7 46 30 48 8D 55 ? E8";
+    inline constexpr uintptr_t   kOff_MountGainCall_Ret = 0x1A;
+
     inline constexpr const char* kSig_FriendlyAddDelta =
         "66 44 89 44 24 18 55 53 57 41 56 41 57 48 8D 6C 24 ? 48 81 EC ? ? ? ? "
         "4C 89 CF 41 0F B7 D8 49 89 D6 49 89 CF 4D 85 C9";
@@ -1802,6 +1820,13 @@ namespace trinity::game
     inline constexpr uintptr_t kOff_FriendlyRec_Group = 0x04; // u16 group/bucket key
     inline constexpr uintptr_t kOff_FriendlyRec_Value = 0x20; // i64 trust value
     inline constexpr int64_t   kFriendly_Max          = 100;  // the taming cap
+
+    // The live relationship object handed to kSig_FriendlyAddDelta as ARG1 -
+    // a different shape from the 0x58-byte record above. Derived from the
+    // function's own prologue (see kSig_FriendlyAddDelta): u32 tier at +0x00,
+    // i64 trust at +0x08. Needed because the accumulator has to be capped
+    // against the CURRENT value, not against the delta alone.
+    inline constexpr uintptr_t kOff_FriendlyRel_Trust = 0x08; // i64 current trust
     // How long the trust-record stream has to be quiet before Friendly::Tick
     // flushes its burst summary to the log. An area load pushes every nearby
     // relationship through in well under a second, so half a second groups a

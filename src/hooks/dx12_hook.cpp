@@ -1052,9 +1052,24 @@ namespace trinity::hooks
         WaitForOverlayIdle();
         CleanupRenderTargets();
     }
-    static void PostResizeRebuild(IDXGISwapChain3* swapChain)
+    // resizeHr is the HRESULT the real ResizeBuffers returned. On failure the
+    // chain still holds the OLD buffers and the game is about to tear it down and
+    // build a new one - re-acquiring here would pin back buffers of a swapchain
+    // that is already dead, keeping DXGI's HWND association alive so the game's
+    // next CreateSwapChainForHwnd fails with E_ACCESSDENIED. The game does not
+    // check that HRESULT; it proceeds with a null swapchain and dereferences it a
+    // frame later inside its WaitForPreviousFrame. Stay empty-handed instead and
+    // let the next Present's ReconcileSwapChain rebuild against whatever is real.
+    static void PostResizeRebuild(IDXGISwapChain3* swapChain, HRESULT resizeHr = S_OK)
     {
         if (!g_imguiReady) return;
+        if (FAILED(resizeHr))
+        {
+            LOG_WARN("ResizeBuffers failed (0x%08X) - holding no back buffers; "
+                     "next Present reconciles.", (unsigned)resizeHr);
+            g_swapChain = nullptr; // force the next ReconcileSwapChain to rebuild
+            return;
+        }
         DXGI_SWAP_CHAIN_DESC desc = {};
         if (SUCCEEDED(swapChain->GetDesc(&desc)))
         {
@@ -1151,7 +1166,22 @@ namespace trinity::hooks
         ULONG STDMETHODCALLTYPE Release() override
         {
             const ULONG r = InterlockedDecrement(&m_ref);
-            if (r == 0) { m_inner->Release(); delete this; }
+            if (r == 0)
+            {
+                // Last ref: the game is destroying this swapchain. Our RTV
+                // references to its back buffers would outlive it and keep the
+                // HWND bound, so the game's next CreateSwapChainForHwnd on the
+                // same window returns E_ACCESSDENIED - which it does not check.
+                // Let go before the chain does.
+                if (g_swapChain == static_cast<IDXGISwapChain3*>(m_inner))
+                {
+                    WaitForOverlayIdle();
+                    CleanupRenderTargets();
+                    g_swapChain = nullptr;
+                }
+                m_inner->Release();
+                delete this;
+            }
             return r;
         }
 
@@ -1180,7 +1210,7 @@ namespace trinity::hooks
         {
             PreResizeCleanup();
             const HRESULT hr = m_inner->ResizeBuffers(bc, w, h, f, fl);
-            PostResizeRebuild(m_inner);
+            PostResizeRebuild(m_inner, hr);
             return hr;
         }
         HRESULT STDMETHODCALLTYPE ResizeTarget(const DXGI_MODE_DESC* p) override { return m_inner->ResizeTarget(p); }
@@ -1229,7 +1259,7 @@ namespace trinity::hooks
         {
             PreResizeCleanup();
             const HRESULT hr = m_inner->ResizeBuffers1(bc, w, h, f, fl, nodeMask, pQueues);
-            PostResizeRebuild(m_inner);
+            PostResizeRebuild(m_inner, hr);
             return hr;
         }
 

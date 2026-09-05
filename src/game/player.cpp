@@ -110,7 +110,6 @@ namespace trinity::game
         constexpr int kMaxGaugePerType = 3;                    // stamina/spirit gauges per body
         constexpr int kMaxStatEntries  = kMaxPlayers * kMaxGaugePerType;
         constexpr int kMaxMountStamEntries = 3;                // one live mount has one gauge
-        constexpr uintptr_t kMountVtableOffset_TU20000 = 0x527C518;
 
         std::atomic<uintptr_t> g_hpEntries[kMaxPlayers]{};
         std::atomic<uintptr_t> g_stamEntries[kMaxStatEntries]{};
@@ -408,22 +407,31 @@ namespace trinity::game
                 }
             }
 
-            // The mounted horse is a separate live character. The verified
-            // class is exact for TU 2.00.00, so no NPC stamina can be pinned.
+            // The mounted horse is a separate live character. It shares the
+            // protagonist TYPE-DESCRIPTOR tag (so IsPlayerClass passes for it -
+            // see CharacterName) but sits in a derived class with its own
+            // vtable, which is what separates it from the body you control.
+            //
+            // Derived here rather than baked: this used to compare against a
+            // hardcoded 0x527C518 captured on TU 2.00.00, which silently
+            // describes nothing after a game update - the address still holds a
+            // valid vtable on 2.00.01, so the mismatch would not even announce
+            // itself, it would just stop matching (or worse, match some other
+            // class). anchorVt above is already resolved live for exactly this
+            // reason; the mount is the protagonist-class instance that is NOT
+            // that vtable. Still class-gated, so no NPC stamina can be pinned.
             if (State::Get().infStamina || State::Get().infMountStamina)
             {
-                const mem::ModuleRegion& mod = mem::GameModule();
-                const uintptr_t mountVt = mod.base + kMountVtableOffset_TU20000;
-
                 for (uint32_t i = 0; i < count && nMountStam < kMaxMountStamEntries; ++i)
                 {
                     uint64_t ch = 0;
                     if (!Read64(static_cast<uintptr_t>(data) + 8ull * i, &ch) || ch < kMinPointer)
                         continue;
                     const uintptr_t owner = static_cast<uintptr_t>(ch);
+                    if (!IsPlayerClass(owner)) continue;
                     uint64_t vt = 0;
                     if (!Read64(owner, &vt) || vt < kMinPointer) continue;
-                    if (vt != mountVt) continue;
+                    if (vt == anchorVt) continue; // the body you control, not the mount
 
                     SelfChain mc;
                     if (!WalkSelfChain(owner, &mc)) continue;
