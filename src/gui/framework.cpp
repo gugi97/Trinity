@@ -210,10 +210,20 @@ namespace trinity::ui
                     g_fontTitle ? g_fontTitle->Glyphs.Size : -1);
             }
             else if (korean)
+            {
                 LOG_WARN("gui: no Korean font found on this system - Korean text will draw "
                          "as boxes. Install Malgun Gothic (Windows Settings > Time & "
                          "language > Language > add Korean), or pick another menu "
                          "language under System.");
+                // Say it on screen too, and say it in ASCII.
+                //
+                // The log line alone left the player looking at a menu of
+                // question marks with no way to find out why - and a translated
+                // message would have been question marks as well. This is the
+                // one string in the menu that must not be localised.
+                Toast("Korean font (Malgun Gothic) is not installed - text will "
+                      "show as boxes. See Trinity.log.");
+            }
             else
                 LOG_WARN("gui: no CJK font found on this system - Chinese and Japanese "
                          "text will draw as '?'. Installing Microsoft YaHei (msyh.ttc) "
@@ -297,6 +307,9 @@ namespace trinity::ui
     // this only records that it is due; the present hook performs it.
     std::atomic<bool> g_fontRebuildPending{false};
 
+    // Frames of navigation input to discard - see the end of RebuildFonts().
+    int g_navSkipFrames = 0;
+
     void RequestFontRebuild() { g_fontRebuildPending.store(true, std::memory_order_release); }
 
     bool ConsumeFontRebuildRequest()
@@ -321,6 +334,22 @@ namespace trinity::ui
         io.FontDefault = nullptr;
         BuildFonts();
         io.Fonts->Build();
+
+        // Swallow the next frame's navigation.
+        //
+        // Rasterising a new atlas stalls the render thread - Korean is the
+        // worst of them, several thousand Hangul glyphs - and the frame that
+        // follows carries that whole stall in its DeltaTime. ImGui measures key
+        // REPEAT against DeltaTime, so a single arrow press that started this
+        // rebuild is reported a second time on the frame after it, and the
+        // Language row advances again on its own. That is the "selecting Korean
+        // jumps to the next language" report: nothing rejected Korean, the row
+        // simply moved twice on one press.
+        //
+        // A stalled frame's input is not something the player did, so it is
+        // dropped rather than interpreted.
+        g_navSkipFrames = 1;
+
         LOG("gui: font atlas rebuilt for the current language.");
     }
 
@@ -459,6 +488,15 @@ namespace trinity::ui
             return;
 
         ImGuiIO& io = ImGui::GetIO();
+
+        // The frame after an atlas rebuild reports input the player did not
+        // give - see RebuildFonts(). g_nav is already zeroed above, so simply
+        // returning leaves this frame with no navigation at all.
+        if (g_navSkipFrames > 0)
+        {
+            --g_navSkipFrames;
+            return;
+        }
 
         // Keyboard (ImGui handles key repeat for held arrows).
         bool anyKey = false;
