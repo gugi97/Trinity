@@ -2188,44 +2188,24 @@ namespace trinity::game
     inline constexpr const char* kSig_FriendlyCommitAddCall =
         "4C 8B 4D ?? 44 0F B7 47 30 48 8D 55 ?? E8";
 
-    // The GREET reward's call into FriendlySetNpc, identified so the setter
-    // hook can tell a reward from a load.
-    //
     // FriendlySetNpc has exactly six callers, verified by scanning every E8 in
     // the image against the thunk at 0x141E2BB60:
     //     0x140712CB2  save-game load          -> must NOT scale
     //     0x14170051E  area streaming sync     -> must NOT scale
-    //     0x1426E9BDF  dialogue commit         -> a reward
+    //     0x1426E9BDF  interaction dispatcher  -> a reward (see below)
     //     0x1427A6B7D  gift commit             -> a reward (already scaled)
     //     0x1427A7576  gift commit             -> a reward (already scaled)
-    //     0x14287B8E5  GREET reward            -> a reward, and the missing one
+    //     0x14287B8E5  NOT a reward            -> must NOT scale
     //
-    // Every one of them hands over a byte-identical 0x68 record, so the record
-    // cannot say which it is; only the return address can. Trinity seeds a
-    // first-sight relationship unscaled - correct for the load bursts, and
-    // exactly wrong for a greet, which IS a first sight and never gets a
-    // second call to scale on. That is why gifting worked (opening the menu
-    // had already seeded the entry) and greeting never did.
+    // Every one of them hands over a byte-identical record, so the record
+    // cannot say which it is; only the return address can.
     //
-    //     48 8B 4E 68              mov rcx, [rsi+0x68]
-    //     48 8D 55 80              lea rdx, [rbp-0x80]   ; a STACK record
-    //     48 8B 89 40 01 00 00     mov rcx, [rcx+0x140]  ; player FriendlyComponent
-    //     E8 ?? ?? ?? ??           call FriendlySetNpc
-    //     66 41 3B DD              cmp bx, r13w
-    //
-    // Note `lea rdx, [rbp-0x80]`: the record is on the CALLER'S STACK and is
-    // copied into the heap map by the callee. Anything that remembers that
-    // pointer past the call is pointing at a dead frame - which is exactly how
-    // an earlier attempt came to write into abandoned stack memory and report
-    // success. Scale it here, in the call, or not at all.
-    //
-    // Verified: one match in 2850, at 0x14287B8D6.
-    inline constexpr const char* kSig_FriendlyGreetSet =
-        "48 8B 4E 68 48 8D 55 80 48 8B 89 40 01 00 00 E8 ?? ?? ?? ?? "
-        "66 41 3B DD";
-    // Byte offset of the instruction AFTER the call - what _ReturnAddress()
-    // reports inside the hook.
-    inline constexpr uintptr_t kOff_GreetSet_Ret = 0x14;
+    // RETRACTED: 0x14287B8E5 was called "the GREET reward" here and wired up as
+    // one. It is not. A live log caught a warp pushing 37 first-sight records
+    // through it in a single second, carrying stored trust (5, 10, 15, 100) -
+    // the streaming path, not an award. Its pattern is deleted rather than kept
+    // and unused, so nothing can register it again by accident. Its single
+    // caller is 0x1426D0678, which is not an interaction path.
 
     // The SECOND reward caller, and the one the player's greets actually use.
     //

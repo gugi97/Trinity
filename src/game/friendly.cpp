@@ -5,6 +5,7 @@
 #include <windows.h> // GetTickCount64, for the burst-summary clock
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <atomic>
 
 #include <MinHook.h>
@@ -15,6 +16,7 @@
 #include "../mem/safe_memory.h"
 #include "../mem/scanner.h"
 #include "../mem/hooks.h"
+#include "../core/version.h"   // TRINITY_MARKER_RESEARCH
 #include "../core/logger.h"
 #include "../core/state.h"
 
@@ -65,6 +67,23 @@ namespace trinity::game
         // cache, reads as a "loss", and reseeds.
         std::mutex g_cacheMx;
         std::unordered_map<uint64_t, int64_t> g_lastVal;
+
+        // Relationships whose scaled value the game handed straight back, and
+        // which Trinity therefore stops scaling for the rest of the session.
+        //
+        // Without this the two sides fight: Trinity raises the value, the game
+        // pushes its own number over the top, the cache reseeds to that number,
+        // the next push reads as a fresh gain, and it starts again. A live log
+        // shows exactly that shape - every summary line reading "N multiplied,
+        // N reverted", for minutes, with a burst of 38 straight after a warp.
+        // The multiplication was never landing for those records, so the count
+        // was reporting the write rather than the result.
+        //
+        // g_ourValue holds only the keys Trinity itself wrote, because "came
+        // back lower" alone does not mean rejection - a reload legitimately
+        // lowers a value we never touched, and that must still reseed.
+        std::unordered_set<uint64_t> g_ourValue;
+        std::unordered_set<uint64_t> g_rejected;
 
         // Burst accounting for the log. These records arrive in clumps - a warp
         // pushes every nearby NPC through in well under a second - so one line
@@ -146,7 +165,7 @@ namespace trinity::game
         // 0 entries are unresolved and match nothing, so a signature that
         // drifts costs the feature and never the save - the same failing-closed
         // rule as g_mountGainRet.
-        uintptr_t g_rewardRets[3] = { 0, 0, 0 };
+        uintptr_t g_rewardRets[2] = { 0, 0 };
 
         bool IsRewardCaller(uintptr_t ret)
         {
@@ -220,20 +239,35 @@ namespace trinity::game
                 // it did have belonged to a different reward path entirely. Keep
                 // it - a setter caller that moves is invisible any other way,
                 // and the feature fails silently rather than loudly when it
-                // does. Bounded: the first dozen first-sight records of the
-                // session, then silent.
+                // does.
+                //
+                // Bounded, but a dozen was too few: the budget ran out in the
+                // first minute of play, so when the player later tested a pet
+                // the silence meant both "the pet never reaches this hook" and
+                // "there was no line left to print". Those need different
+                // answers, so the budget now outlasts a deliberate test and the
+                // line says which setter it came through.
+                //
+                // RESEARCH ONLY. It prints one line per first-sight record,
+                // which is the right density for hunting a moved call site and
+                // the wrong one for a release log - a warp alone pushes dozens.
+                // pack-release.ps1 compiles TRINITY_MARKER_RESEARCH to 0, so a
+                // shipping binary does not carry these strings at all.
+#if TRINITY_MARKER_RESEARCH
                 {
                     static int s_seen = 0;
-                    if (s_seen < 12)
+                    if (s_seen < 40)
                     {
                         ++s_seen;
-                        LOG("friendly/who: first-sight key %u grp %u val %lld "
+                        LOG("friendly/who: %s first-sight key %u grp %u val %lld "
                             "from %llX%s.",
+                            mapId ? "PET" : "npc",
                             key, static_cast<unsigned>(group),
                             static_cast<long long>(newVal), retAddr,
                             greetReward ? " == REWARD" : "");
                     }
                 }
+#endif
 
                 auto itBase = g_lastVal.find(ckBase);
                 if (itBase == g_lastVal.end() && !greetReward)
@@ -270,12 +304,14 @@ namespace trinity::game
             const bool  on   = st.trustMult && mult > 1.0f;
 
 
-            if (on && newVal > oldVal && oldVal < kFriendly_Max)
+            if (on && newVal > oldVal && oldVal < kFriendly_Max &&
+                g_rejected.find(ckLive) == g_rejected.end())
             {
                 const int64_t s = ScaleGain(oldVal, newVal, mult);
                 if (s != newVal && Write64(r + kOff_FriendlyRec_Value, s))
                 {
                     ++g_scaled;
+                    g_ourValue.insert(ckLive);
                     // Record what we actually wrote. Skipping this leaves
                     // oldVal frozen at the first value we ever saw, so the
                     // next record for this relationship scales from that
@@ -293,7 +329,17 @@ namespace trinity::game
             // move for a reload, so the value is let through either way. It is
             // counted because a session full of reverts is the signature of the
             // second case, and that is the thing worth seeing in the log.
-            if (newVal < oldVal) ++g_reverted; else ++g_passed;
+            //
+            // When the value that came back lower is one TRINITY wrote, that is
+            // not a reload - the game rejected the write. Give that relationship
+            // up rather than re-scale it on the next push, which is the loop
+            // described at g_rejected.
+            if (newVal < oldVal)
+            {
+                ++g_reverted;
+                if (g_ourValue.erase(ckLive)) g_rejected.insert(ckLive);
+            }
+            else ++g_passed;
             g_lastVal[ckLive] = newVal;
         }
 
@@ -438,38 +484,36 @@ namespace trinity::game
         // code patching, nothing per-frame: this only changes how the record
         // the existing hooks already receive is interpreted.
         //
-        // Two sites, because greeting and dialogue do not share one. The
-        // dispatcher applies a greet through its own call at 0x1426E9BDF; the
-        // separate 0x14287B8E5 site is the one Trinity shipped, and a live log
-        // shows both really do deliver rewards - so keep both rather than
-        // trading one blind spot for another.
+        // ONE source, the interaction dispatcher, and deliberately not the
+        // 0x14287B8E5 site Trinity shipped first.
+        //
+        // That site was registered as "the GREET reward" on a static reading of
+        // the caller list, and a live log refuted it: a warp produced 37
+        // first-sight records through it inside a single second, carrying 5, 10,
+        // 15 and 100. No interaction awards 37 NPCs at once, and the values are
+        // stored trust rather than awards - it is the streaming push. Treating
+        // it as a reward multiplied the save file on every warp, which is the
+        // exact failure the seed branch exists to prevent.
+        //
+        // The dispatcher is different in kind, not just in address: it walks an
+        // array of PENDING REWARDS, so every record reaching these two calls is
+        // an award by construction. That is a structural guarantee rather than
+        // an inference about what a caller probably is, which is what the first
+        // attempt got wrong.
         {
-            int found = 0;
             const uintptr_t apply = mem::FindPattern(kSig_FriendlyRewardApply);
             if (apply && mem::CountMatches(kSig_FriendlyRewardApply, 4) == 1)
             {
                 g_rewardRets[0] = apply + kOff_RewardApply_NpcRet;
                 g_rewardRets[1] = apply + kOff_RewardApply_PetRet;
-                found += 2;
-            }
-            const uintptr_t greet = mem::FindPattern(kSig_FriendlyGreetSet);
-            if (greet && mem::CountMatches(kSig_FriendlyGreetSet, 4) == 1)
-            {
-                g_rewardRets[2] = greet + kOff_GreetSet_Ret;
-                ++found;
-            }
-
-            if (found == 3)
-                LOG("friendly: reward call sites @ %llX %llX %llX - greeting scales.",
+                LOG("friendly: reward call sites @ %llX %llX - greeting scales.",
                     (unsigned long long)g_rewardRets[0],
-                    (unsigned long long)g_rewardRets[1],
-                    (unsigned long long)g_rewardRets[2]);
-            else if (found)
-                LOG_WARN("friendly: only %d of 3 reward call sites resolved - some "
-                         "first-time trust gains will not scale.", found);
+                    (unsigned long long)g_rewardRets[1]);
+            }
             else
-                LOG_WARN("friendly: no reward call site resolved - gifting and "
-                         "feeding still scale, greeting does not.");
+                LOG_WARN("friendly: reward call site %s - gifting and feeding "
+                         "still scale, greeting does not.",
+                         apply ? "is ambiguous" : "NOT FOUND");
         }
 
         // Greet and dialogue, at last - by rewriting one call rather than
@@ -571,6 +615,8 @@ namespace trinity::game
         }
         std::lock_guard<std::mutex> lk(g_cacheMx);
         g_lastVal.clear();
+        g_ourValue.clear();
+        g_rejected.clear();
 g_seeded = g_scaled = g_reverted = g_passed = g_gains = 0;
         g_lastRec = 0;
     }
@@ -582,7 +628,8 @@ g_seeded = g_scaled = g_reverted = g_passed = g_gains = 0;
         const uint64_t last = g_lastRec;
         if (!last || GetTickCount64() - last < kFriendlyBurst_QuietMs) return;
 
-        int seeded = 0, scaled = 0, reverted = 0, passed = 0, gains = 0;
+        int    seeded = 0, scaled = 0, reverted = 0, passed = 0, gains = 0;
+        size_t givenUp = 0;
         {
             std::lock_guard<std::mutex> lk(g_cacheMx);
             if (!g_lastRec || GetTickCount64() - g_lastRec < kFriendlyBurst_QuietMs) return;
@@ -591,6 +638,7 @@ g_seeded = g_scaled = g_reverted = g_passed = g_gains = 0;
             reverted = g_reverted;
             passed   = g_passed;
             gains    = g_gains;
+            givenUp  = g_rejected.size();
             g_seeded = g_scaled = g_reverted = g_passed = g_gains = 0;
             g_lastRec = 0;
         }
@@ -601,9 +649,17 @@ g_seeded = g_scaled = g_reverted = g_passed = g_gains = 0;
         // resting state, not news; they ride along on a line that had a reason
         // to exist anyway.
         if (!gains && !scaled && !reverted) return;
-        LOG("friendly: %d trust gain(s) multiplied%s.",
-            gains + scaled,
-            reverted ? " (some were reverted by the game and will re-scale)" : "");
+        // The revert COUNT, not just that some happened. A steady stream of
+        // reverts is a write loop - Trinity scaling, the game putting its own
+        // number back, Trinity scaling the same record again - and that reads
+        // identically to healthy operation when the number is hidden behind
+        // "some".
+        if (reverted)
+            LOG("friendly: %d trust gain(s) multiplied, %d reverted by the game "
+                "(%zu relationship(s) given up).",
+                gains + scaled, reverted, givenUp);
+        else
+            LOG("friendly: %d trust gain(s) multiplied.", gains + scaled);
     }
 
     bool Friendly::Ready()

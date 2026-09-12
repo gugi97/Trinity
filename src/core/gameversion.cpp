@@ -18,11 +18,12 @@ namespace trinity
         // say so rather than imply a guarantee that was never made.
         struct KnownBuild { uint16_t revision; const char* tu; bool verified; };
         constexpr KnownBuild kKnown[] = {
-            { 2850, "2.02.00",          false },  // known, not yet live-tested: all 37 byte signatures
-                                                  // still resolve against this build (32 uniquely, 5
-                                                  // ambiguous of which 4 are ambiguous by design), but
-                                                  // the struct offsets no signature can check are still
-                                                  // being audited - 2.01.00 moved three of those silently
+            { 2850, "2.02.00",          true  },  // verified: this patch moved no byte signature at
+                                                  // all (0 of 41 gone), and the struct offsets a scan
+                                                  // cannot see were audited separately. Add Item,
+                                                  // durable dye, Teleport to Destination, No Bounty,
+                                                  // Free Flight, Easy Parry and Trust Multiplier were
+                                                  // each run in-game on this build
             { 2760, "2.01.00",          true  },  // verified: re-derived and live-tested after this patch
                                                   // rescheduled code image-wide and broke 30 of 47 signatures
             { 2658, "2.00.01",          true  },  // verified: every signature re-checked, features live-tested

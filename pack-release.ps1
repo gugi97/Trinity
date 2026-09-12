@@ -81,7 +81,8 @@ $ascii = [Text.Encoding]::ASCII.GetString($bytes)
 $utf16 = [Text.Encoding]::Unicode.GetString($bytes)
 $bad   = @()
 foreach ($w in "VTweak","vtweak","OptiScaler","CrimsonRoute","Orcax",
-                "money/probe","marker/search","Marker Search","3289") {
+                "money/probe","marker/search","Marker Search","3289",
+                "friendly/who") {
     $n = ([regex]::Matches($ascii,[regex]::Escape($w))).Count +
          ([regex]::Matches($utf16,[regex]::Escape($w))).Count
     Write-Host ("  {0,-16} {1}" -f $w, $n)

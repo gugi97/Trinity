@@ -105,11 +105,13 @@ namespace trinity::gui
                         "are untouched.");
         changed |= ui::ToggleFloat("Trust Multiplier", &st.trustMult, &st.trustMultVal, 1.0f, 25.0f, 0.25f, 3.0f, "%.2fx",
                         game::Friendly::Ready()
-                            ? "Gifting NPCs or feeding animals builds trust faster. Greeting and "
-                              "dialogue are NOT included. Each award is capped at 100, so very "
-                              "high multipliers stop adding anything."
-                            : "Gifting NPCs or feeding animals builds trust faster. Greeting and "
-                              "dialogue are NOT included. Unavailable right now.");
+                            ? "Greeting, gifting and feeding all build trust faster. "
+                              "Trust itself stops at 100, so this compresses progress toward "
+                              "that ceiling rather than multiplying the number: a +5 award "
+                              "becomes +14 at 3.00x and +64 at 20.00x. Every setting stays "
+                              "different from the next, and none of them can pass 100."
+                            : "Greeting, gifting and feeding all build trust faster. "
+                              "Unavailable right now.");
         if (ui::Toggle("Easy Parry", &st.easyParry,
                        game::Parry::Available()
                            ? "Removes the timing-margin test on a parry. You still have to parry the "
