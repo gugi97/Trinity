@@ -5,6 +5,7 @@
 #include <windows.h> // GetTickCount64, for the burst-summary clock
 #include <mutex>
 #include <unordered_map>
+#include <atomic>
 
 #include <MinHook.h>
 
@@ -134,8 +135,30 @@ namespace trinity::game
         // that crashed. Set once at Install().
         uintptr_t g_mountGainRet = 0;
 
+
+        // Every call site that delivers a REWARD through the setters, as
+        // opposed to a load. FriendlySetNpc has six callers and the record they
+        // hand over is byte-identical in all six, so the return address is the
+        // only thing that separates "the player just earned this" from "the
+        // save loader is restoring it". Two of the six are that loader and area
+        // streaming, and scaling either one multiplies the save file itself.
+        //
+        // 0 entries are unresolved and match nothing, so a signature that
+        // drifts costs the feature and never the save - the same failing-closed
+        // rule as g_mountGainRet.
+        uintptr_t g_rewardRets[3] = { 0, 0, 0 };
+
+        bool IsRewardCaller(uintptr_t ret)
+        {
+            if (!ret) return false;
+            for (uintptr_t r : g_rewardRets)
+                if (r && r == ret) return true;
+            return false;
+        }
+
         // mapId keeps the NPC (0) and pet (1) key spaces apart in the cache.
-        void ScaleRecord(void* record, uint32_t mapId)
+        // retAddr is where this setter call is returning to - see IsRewardCaller.
+        void ScaleRecord(void* record, uint32_t mapId, uintptr_t retAddr)
         {
             const uintptr_t r = reinterpret_cast<uintptr_t>(record);
             if (r < kMinPointer) return;
@@ -169,6 +192,7 @@ namespace trinity::game
                 return;
             }
 
+
             // Gameplay write. Old value = this relationship's last value if we've
             // seen it; else the group's persisted baseline (so the FIRST
             // interaction with an NPC - e.g. a greet, which may be the only one
@@ -182,8 +206,37 @@ namespace trinity::game
             }
             else
             {
+                // A greet reward is a gain from whatever the NPC had, which on
+                // first sight is nothing - so scale it instead of seeding. The
+                // caller is the only thing that distinguishes this from the
+                // area-load burst described below, and the two are otherwise
+                // byte-identical.
+                const bool greetReward = IsRewardCaller(retAddr);
+
+                // Which callers actually reach this hook, and with what.
+                //
+                // This is what found the bug: three greets logged a return
+                // address Trinity did not have in its table, while the address
+                // it did have belonged to a different reward path entirely. Keep
+                // it - a setter caller that moves is invisible any other way,
+                // and the feature fails silently rather than loudly when it
+                // does. Bounded: the first dozen first-sight records of the
+                // session, then silent.
+                {
+                    static int s_seen = 0;
+                    if (s_seen < 12)
+                    {
+                        ++s_seen;
+                        LOG("friendly/who: first-sight key %u grp %u val %lld "
+                            "from %llX%s.",
+                            key, static_cast<unsigned>(group),
+                            static_cast<long long>(newVal), retAddr,
+                            greetReward ? " == REWARD" : "");
+                    }
+                }
+
                 auto itBase = g_lastVal.find(ckBase);
-                if (itBase == g_lastVal.end())
+                if (itBase == g_lastVal.end() && !greetReward)
                 {
                     // First sight of this relationship, with no group baseline
                     // either: SEED it and pass it through untouched.
@@ -207,7 +260,9 @@ namespace trinity::game
                     g_lastVal[ckLive] = newVal;
                     return;
                 }
-                oldVal = itBase->second;
+                // A greet with no baseline started from nothing; otherwise the
+                // group's persisted value is where this relationship stood.
+                oldVal = (itBase == g_lastVal.end()) ? 0 : itBase->second;
             }
 
             const State& st = State::Get();
@@ -242,15 +297,49 @@ namespace trinity::game
             g_lastVal[ckLive] = newVal;
         }
 
+
+        // The greet/dialogue award, reached by rewriting one call rather than
+        // hooking the callee - see kSig_FriendlyCommitAddCall. Five arguments:
+        // the fifth is already homed at the call site, so it has to be
+        // forwarded even though nothing here reads it.
+        using AddDelta_t = void*(__fastcall*)(void* rel, int32_t* status,
+                                              uint16_t group, int64_t delta,
+                                              void* extra);
+        AddDelta_t oCommitAddDelta = nullptr;
+        uintptr_t  g_commitAddCall = 0;
+
+        void* __fastcall hkCommitAddDelta(void* rel, int32_t* status, uint16_t group,
+                                          int64_t delta, void* extra)
+        {
+            const State& st = State::Get();
+            if (st.trustMult && st.trustMultVal > 1.0f && delta > 0)
+            {
+                // No clamp here on purpose. kFriendly_Max is Trinity's own
+                // number, not the engine's, and the engine evaluates its tier
+                // thresholds inside this call - so handing it the real
+                // multiplied delta is what makes tiers advance, rollovers
+                // subtract and the tier-up notification fire, instead of
+                // Trinity deciding for it.
+                const double scaled = static_cast<double>(delta) *
+                                      static_cast<double>(st.trustMultVal);
+                delta = scaled > 9.0e15 ? static_cast<int64_t>(9.0e15)
+                                        : static_cast<int64_t>(scaled);
+            }
+            return oCommitAddDelta(rel, status, group, delta, extra);
+        }
+
         void* __fastcall hkSetNpc(void* mapOwner, void* record)
         {
-            ScaleRecord(record, 0);
+            // Taken before anything else: the caller is what says whether this
+            // record is a reward or a load.
+            const uintptr_t ret = reinterpret_cast<uintptr_t>(_ReturnAddress());
+            ScaleRecord(record, 0, ret);
             return oSetNpc(mapOwner, record);
         }
 
         void* __fastcall hkSetPet(void* mapOwner, void* record)
         {
-            ScaleRecord(record, 1);
+            ScaleRecord(record, 1, reinterpret_cast<uintptr_t>(_ReturnAddress()));
             return oSetPet(mapOwner, record);
         }
 
@@ -302,15 +391,17 @@ namespace trinity::game
 
     bool Friendly::Install()
     {
-        const bool npc = mem::InstallHookAny("friendly: NPC trust setter",
-                                             { kSig_FriendlySetNpc_20001,
-                                               kSig_FriendlySetNpc,
-                                               kSig_FriendlySetNpc_1180 },
-                                             "NPC gift Trust Multiplier disabled",
-                                             &hkSetNpc, &oSetNpc, &g_npcTarget);
-        const bool pet = mem::InstallHook("friendly: pet trust setter", kSig_FriendlySetPet,
-                                          "pet Trust Multiplier disabled",
-                                          &hkSetPet, &oSetPet, &g_petTarget);
+        // Both setters are matched inside their bodies, on the map offsets
+        // that distinguish them, and located through the unwind tables - see
+        // kSig_FriendlySetNpc for why the old prologue patterns are gone.
+        const bool npc = mem::InstallHookInterior("friendly: NPC trust setter",
+                                                  kSig_FriendlySetNpc,
+                                                  "NPC gift Trust Multiplier disabled",
+                                                  &hkSetNpc, &oSetNpc, &g_npcTarget);
+        const bool pet = mem::InstallHookInterior("friendly: pet trust setter",
+                                                  kSig_FriendlySetPet,
+                                                  "pet Trust Multiplier disabled",
+                                                  &hkSetPet, &oSetPet, &g_petTarget);
         // The delta accumulator is deliberately NOT hooked.
         //
         // It is the path that makes greet and feed scale (0.18.1's answer to
@@ -343,6 +434,108 @@ namespace trinity::game
         // never called? These two say which, and cost one line each.
         if (add) LOG("friendly: trust gain accumulator hooked - greet and feed scale.");
 
+        // Teach the setter hooks which callers are rewards. No new hook, no
+        // code patching, nothing per-frame: this only changes how the record
+        // the existing hooks already receive is interpreted.
+        //
+        // Two sites, because greeting and dialogue do not share one. The
+        // dispatcher applies a greet through its own call at 0x1426E9BDF; the
+        // separate 0x14287B8E5 site is the one Trinity shipped, and a live log
+        // shows both really do deliver rewards - so keep both rather than
+        // trading one blind spot for another.
+        {
+            int found = 0;
+            const uintptr_t apply = mem::FindPattern(kSig_FriendlyRewardApply);
+            if (apply && mem::CountMatches(kSig_FriendlyRewardApply, 4) == 1)
+            {
+                g_rewardRets[0] = apply + kOff_RewardApply_NpcRet;
+                g_rewardRets[1] = apply + kOff_RewardApply_PetRet;
+                found += 2;
+            }
+            const uintptr_t greet = mem::FindPattern(kSig_FriendlyGreetSet);
+            if (greet && mem::CountMatches(kSig_FriendlyGreetSet, 4) == 1)
+            {
+                g_rewardRets[2] = greet + kOff_GreetSet_Ret;
+                ++found;
+            }
+
+            if (found == 3)
+                LOG("friendly: reward call sites @ %llX %llX %llX - greeting scales.",
+                    (unsigned long long)g_rewardRets[0],
+                    (unsigned long long)g_rewardRets[1],
+                    (unsigned long long)g_rewardRets[2]);
+            else if (found)
+                LOG_WARN("friendly: only %d of 3 reward call sites resolved - some "
+                         "first-time trust gains will not scale.", found);
+            else
+                LOG_WARN("friendly: no reward call site resolved - gifting and "
+                         "feeding still scale, greeting does not.");
+        }
+
+        // Greet and dialogue, at last - by rewriting one call rather than
+        // hooking the callee. See kSig_FriendlyCommitAddCall for why the
+        // callee itself is off limits. Non-fatal: without it gifts still
+        // scale, which is where this feature has been for three releases.
+        // DISABLED after a crash report. Do not re-enable without reading this.
+        //
+        // PatchCall rewrites four bytes INSIDE a live instruction while the
+        // game is running. That write is not atomic: if another thread is
+        // executing this exact call at that moment it can fetch a half-updated
+        // rel32 and jump somewhere arbitrary. Install() runs during startup,
+        // when the game is already multi-threaded, so the window is real -
+        // and the interaction commit is not obviously cold at that point.
+        //
+        // Hooking a function via MinHook does not have this problem: it
+        // patches an instruction boundary at a function entry and handles the
+        // serialisation. Rewriting the middle of somebody else's basic block
+        // is a different and worse thing, and I shipped it without saying so.
+        //
+        // Making it safe needs, at minimum: suspend every other thread, verify
+        // none has its RIP inside the five bytes, write, resume - and even
+        // then an 8-byte-aligned single write would be the honest way to do
+        // it. Until that exists, greet/dialogue does not scale.
+        constexpr bool kPatchGreetAwardCall = false;
+        const uintptr_t addSite = kPatchGreetAwardCall
+                                  ? mem::FindPattern(kSig_FriendlyCommitAddCall) : 0;
+        if (addSite && mem::CountMatches(kSig_FriendlyCommitAddCall, 4) == 1)
+        {
+            g_commitAddCall = addSite + kOff_CommitAddCall_Call;
+            if (mem::PatchCall(g_commitAddCall, &hkCommitAddDelta,
+                               reinterpret_cast<void**>(&oCommitAddDelta)))
+                LOG("friendly: greet/dialogue award call redirected @ %llX - greeting "
+                    "and dialogue now scale too.", g_commitAddCall);
+            else
+            {
+                g_commitAddCall = 0;
+                LOG_WARN("friendly: greet/dialogue award call could not be redirected - "
+                         "only gifting and feeding scale.");
+            }
+        }
+        else if (kPatchGreetAwardCall)
+        {
+            LOG_WARN("friendly: greet/dialogue award call site %s - only gifting and "
+                     "feeding scale.", addSite ? "is ambiguous" : "NOT FOUND");
+        }
+
+        // The interaction hook is GONE, and the negative result is the point.
+        //
+        // It was tried on both halves of the pair - validate (0x1426E9AE0) and
+        // commit (0x1426E9C10, which genuinely does load [rec+0x20] at
+        // 0x1426E9CD6 and hand it to 0x142ACBFD0) - with and without restoring
+        // the original afterwards. Greet trust stayed at the base award every
+        // time. The record it scales is not where the greet award comes from;
+        // that arrives through the delta accumulator, which stays unhooked
+        // because hooking it kills the game on horseback (see kHookTrustDelta).
+        //
+        // So it detoured a function on the interaction path, changed nothing,
+        // and logged "N trust gain(s) multiplied" while doing it - which reads
+        // as success to anyone watching the log, and cost several rounds of
+        // testing to disprove. A hook that cannot affect the outcome should not
+        // be installed, and must never narrate one.
+        //
+        // kSig_FriendlyNpcCommit and its anchor stay in offsets.h: the research
+        // is correct and worth keeping, only the conclusion changed.
+
         // Resolve the mount call site so hkTrustAdd can refuse to scale it.
         // Failing to find it is not fatal, but it does switch the delta path
         // off - see the comment in hkTrustAdd for why that is the safe side.
@@ -370,6 +563,12 @@ namespace trinity::game
         mem::RemoveHook(&g_npcTarget);
         mem::RemoveHook(&g_petTarget);
         mem::RemoveHook(&g_addTarget);
+        if (g_commitAddCall && oCommitAddDelta)
+        {
+            mem::UnpatchCall(g_commitAddCall, reinterpret_cast<void*>(oCommitAddDelta));
+            g_commitAddCall = 0;
+            oCommitAddDelta = nullptr;
+        }
         std::lock_guard<std::mutex> lk(g_cacheMx);
         g_lastVal.clear();
 g_seeded = g_scaled = g_reverted = g_passed = g_gains = 0;

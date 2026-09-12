@@ -18,6 +18,13 @@ namespace trinity
         // say so rather than imply a guarantee that was never made.
         struct KnownBuild { uint16_t revision; const char* tu; bool verified; };
         constexpr KnownBuild kKnown[] = {
+            { 2850, "2.02.00",          false },  // known, not yet live-tested: all 37 byte signatures
+                                                  // still resolve against this build (32 uniquely, 5
+                                                  // ambiguous of which 4 are ambiguous by design), but
+                                                  // the struct offsets no signature can check are still
+                                                  // being audited - 2.01.00 moved three of those silently
+            { 2760, "2.01.00",          true  },  // verified: re-derived and live-tested after this patch
+                                                  // rescheduled code image-wide and broke 30 of 47 signatures
             { 2658, "2.00.01",          true  },  // verified: every signature re-checked, features live-tested
             { 2625, "2.00.00",          true  },  // verified: every signature re-checked
             { 2474, "1.18.02",          true  },
@@ -104,6 +111,16 @@ namespace trinity
         if (v.isVerified())
             LOG("version: Crimson Desert %s (TU %s) - the build this release was checked against.",
                 v.text(), v.titleUpdate());
+        else if (v.known)
+            // Known but not signed off. Saying "has not been checked" here
+            // was misleading: the build IS in the table, its signatures have
+            // been re-derived against it, and most features have been run.
+            // What has not happened is the full pass. Say that instead.
+            LOG_WARN("version: Crimson Desert %s (TU %s) - re-derived for this build but "
+                     "not yet fully verified. Anything that resolves will work; anything "
+                     "still moving will disable itself and say so below. Quote this line "
+                     "in a bug report.",
+                     v.text(), v.titleUpdate());
         else
             LOG_WARN("version: Crimson Desert %s (TU %s) - Trinity has not been checked "
                      "against this build. Anything that resolves will work; anything the "

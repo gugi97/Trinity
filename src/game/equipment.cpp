@@ -38,7 +38,9 @@ namespace trinity::game
         // the record but not the derived effect structure, so we mark the state
         // dirty and the next game-thread Tick runs this on the client equip
         // component - the same full refresh the Witch's own socketing runs.
-        using EquipRefresh_t = void* (__fastcall*)(void*, int*);
+        // ONE argument. The engine's sole caller (0x1407A3AFD) passes only
+        // rcx, and the function overwrites rdx before ever reading it.
+        using EquipRefresh_t = void* (__fastcall*)(void* comp);
         EquipRefresh_t    g_refresh = nullptr; // sub_7C88A0
         std::atomic<bool> g_dirty{ false };
 
@@ -688,8 +690,7 @@ namespace trinity::game
         }
         __try
         {
-            int err = 0;
-            g_refresh(reinterpret_cast<void*>(comp), &err);
+            g_refresh(reinterpret_cast<void*>(comp));
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {

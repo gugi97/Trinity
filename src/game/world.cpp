@@ -93,17 +93,18 @@ namespace trinity::game
         // pin, no cross-thread race (see offsets.h kSig_FieldTimeTick). Only
         // the clock stops; physics, AI and combat keep running.
         //
-        // The delta rides in xmm1 as a single float; the prototype declares it
-        // so the register survives the trampoline untouched on pass-through.
-        using FieldTimeTick_t = void(__fastcall*)(void* mgr, float delta, float d2);
+        // TWO arguments: the manager in rcx and the delta in xmm1. The third
+        // float this used to declare does not exist - the function never
+        // touches xmm2, and its sole caller (0x1408C86B1) never sets it.
+        using FieldTimeTick_t = void(__fastcall*)(void* mgr, float delta);
         FieldTimeTick_t oFieldTimeTick = nullptr;
         void* g_fieldTimeTickTarget = nullptr;
 
-        void __fastcall hkFieldTimeTick(void* mgr, float delta, float d2)
+        void __fastcall hkFieldTimeTick(void* mgr, float delta)
         {
             if (State::Get().timeFrozen)
                 delta = 0.0f; // clock stops accruing; sun + numeric clock hold
-            oFieldTimeTick(mgr, delta, d2);
+            oFieldTimeTick(mgr, delta);
         }
 
 
@@ -182,14 +183,19 @@ namespace trinity::game
 
         // The only Game Speed path. It sets the engine's own time scale -
         // mode byte at +0x50, multiplier float at +0x54 on the time manager
-        // hanging off ctx+0x60 - which the engine then applies itself at
-        // 0x1409481F9 (`vmulss xmm0, xmm1, [rax+0x64]`). Nothing else here
-        // touches the frame delta any more; see the note in Tick.
-        if (mem::InstallHook("world: master frame update", kSig_MasterFrameUpdate,
-                             "Game Speed disabled",
-                             reinterpret_cast<void*>(hkMasterFrameUpdate),
-                             reinterpret_cast<void**>(&oMasterFrameUpdate),
-                             &g_masterFrameTarget, 1))
+        // hanging off ctx+0x60 - which the engine then applies itself further
+        // down the same function (`vmulss xmm0, xmm1, [rax+0x64]`, at
+        // 0x140A5470D in 2760). Nothing else here touches the frame delta any
+        // more; see the note in Tick.
+        //
+        // Interior match: the signature keys on the body rather than the
+        // prologue, because 2.01.00 recompiled the prologue and disabled Game
+        // Speed without moving the function an inch. See kSig_MasterFrameUpdate.
+        if (mem::InstallHookInterior("world: master frame update", kSig_MasterFrameUpdate,
+                                     "Game Speed disabled",
+                                     reinterpret_cast<void*>(hkMasterFrameUpdate),
+                                     reinterpret_cast<void**>(&oMasterFrameUpdate),
+                                     &g_masterFrameTarget))
         {
             LOG("world: master frame update hook installed @ %p - Game Speed ready.", g_masterFrameTarget);
         }

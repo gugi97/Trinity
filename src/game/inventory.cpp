@@ -57,20 +57,73 @@ namespace trinity::game
         using HolderInsert_t = void*(__fastcall*)(void*, void*, void*, void*, uint16_t,
                                                   void*, uint8_t, uint8_t, uint8_t);
         // Transaction commit: (holder, err, CONTAINER, items, out, c, c).
-        using Commit_t = void*(__fastcall*)(void*, void*, void*, void*, void*, uint8_t, uint8_t);
+        // EIGHT arguments. This is HOOKED, so under-declaring it does not
+        // just mis-call the engine - it makes the detour forward seven
+        // arguments to a function that reads eight, leaving the last one as
+        // whatever is on our stack. It is then passed straight into a
+        // sub-call as a pointer.
+        using Commit_t = void*(__fastcall*)(void* holder, void* err, void* container,
+                                            void* items, uint8_t a5, uint8_t a6,
+                                            void* a7, void* a8);
         // The game's own slot-expansion setter (kSig_InvSetExpandSlots):
-        // (holder, &err, unused, bucketType, expansionCount). See offsets.h -
-        // `count` is the expansion beyond _defaultSlotCount, not the cap.
-        using SetExpandSlots_t = void*(__fastcall*)(void*, int*, void*, uint16_t, uint16_t);
+        // (holder, &err, bucketType, expansionCount). See offsets.h - `count`
+        // is the expansion beyond _defaultSlotCount, not the cap.
+        //
+        // TU 2.01.00 DROPPED the unused third parameter. That is not cosmetic:
+        // with the old five-argument form the real bucketType would be passed
+        // in r9 while r8 carried the dead argument, so every expansion would
+        // silently address the wrong bucket - or none. The 2760 body proves
+        // the new shape: it reads the holder through rcx (+0x18 buckets,
+        // +0x20 count), stores the error through rdx, compares bucket+0x10
+        // against r8w, and writes r9w into bucket+0x16.
+        using SetExpandSlots_t = void*(__fastcall*)(void*, int*, uint16_t, uint16_t);
         // --- The add-item primitives (see the add-item note in offsets.h) ----
         // Resolved, not hooked: we CALL these. oHolderInsert above doubles as
         // the insert PLANNER - it is the same function (kSig_InvHolderInsert),
         // and calling its trampoline runs the original without re-entering our
         // own capture hook.
         using ItemValueCtor_t   = void*(__fastcall*)(void* itemVal, uint16_t* typeId, int64_t qty);
-        using CommitPlacement_t = void*(__fastcall*)(void* holder, int* err, void* unused,
+        // EIGHT arguments, and the earlier five-argument form was wrong in
+        // two separate ways at once. The 2760 prologue and the engine's own
+        // commit loop (0x14094BE40, calling at 0x14094BF52) between them
+        // spell out the whole contract:
+        //
+        //     mov r12, rcx           holder; it reads [rcx+8]
+        //     mov r14, rdx           the out-pointer it later returns
+        //     movzx edi, r8w         r8 is a WORD - the BUCKET TYPE, not a
+        //                            pointer, and not the slot index either
+        //     mov r15, r9            the placement record
+        // then four STACK arguments, read at entry [rsp+0x28..0x40]:
+        //     arg5  u16    slot index
+        //     arg6  u16    a second index the engine takes from its caller
+        //     arg7  void*  -> a zeroed 16-byte {ptr,count,capacity} the
+        //                     engine appends committed placements into
+        //     arg8  void*  -> a 16-byte PAIR {nullptr, &second such vector}
+        //
+        // arg8 is not a scalar, and getting that wrong is not survivable:
+        // the engine does `mov rsi,arg8; mov rax,[rsi]; mov rax,[rsi+8]`
+        // and later dereferences [rsi+8] as a vector it appends to. Hand it
+        // eight bytes and the second half comes off our uninitialised stack
+        // and gets written through. The engine's own callers build exactly
+        // this shape at 0x14094BF01..0x14094BF1F.
+        //
+        // Trinity passed the CONTAINER pointer in r8, so every commit was
+        // told to use bucket type (container & 0xFFFF); and it supplied none
+        // of the four stack arguments, so the engine read them off our
+        // uninitialised stack. That is exactly what Add Item's
+        // "all 1 commits failed, first err=0x78C0A4E9" and its sibling
+        // "exception (built=1 planned=1)" were - the plan succeeded, and
+        // every commit was then handed garbage.
+        //
+        // Both mistakes are silent at the call site: C++ will happily pass
+        // five arguments to a function that reads eight. InvSetExpandSlots
+        // lost a parameter to the same patch, so this is a shape worth
+        // checking for across the whole add-item path.
+        using CommitPlacement_t = void*(__fastcall*)(void* holder, int* err,
                                                      void* placement, uint16_t slotIdx);
         using FreePlacements_t  = void(__fastcall*)(void* vec);
+        using BumpRevision_t    = void(__fastcall*)(void* holder);
+
         using ItemValueDtor_t   = void(__fastcall*)(void* itemVal);
         GetItemQty_t      oGetItemQty      = nullptr;
         GetHolder_t       oGetHolder       = nullptr;
@@ -79,7 +132,10 @@ namespace trinity::game
         SetExpandSlots_t  oSetExpandSlots  = nullptr;
         ItemValueCtor_t   oItemValueCtor   = nullptr;
         CommitPlacement_t oCommitPlacement = nullptr;
+        uintptr_t         g_commitPlacementAddr = 0;
         FreePlacements_t  oFreePlacements  = nullptr;
+        BumpRevision_t    oBumpRevision    = nullptr;
+
         ItemValueDtor_t   oItemValueDtor   = nullptr;
         void*          g_qtyTarget   = nullptr;
         void*          g_insTarget   = nullptr;
@@ -648,6 +704,9 @@ namespace trinity::game
                          bool gameNamed; std::vector<Group> groups; };
         std::vector<Storage> g_storages;
         ULONGLONG g_lastRefresh = 0;
+        // Milliseconds the list is allowed to go stale. Raised by the walk
+        // itself when it turns out to be expensive - see RefreshImpl.
+        ULONGLONG g_refreshBudget = 120;
 
         // Bounds-checked accessors for the two outer levels - every public
         // getter goes through these rather than repeating the index checks.
@@ -863,10 +922,49 @@ namespace trinity::game
         // judging each candidate on its own merits below instead: a churned-away
         // client, a freed container and a planner copy all fail IsLiveCharacter,
         // which is what the test is for.
+        // The SERVER realm's character manager global (kSig_CharMgrServer),
+        // resolved once at Install. 0 if the signature did not match, in
+        // which case the candidate scan below is all we have.
+        uintptr_t g_serverCharMgrGlobal = 0;
+
+        // The server-authority player character, straight from that manager.
+        //
+        // Same shape as the client walk in player.cpp: the manager holds a
+        // vector of characters, and the one the player actually controls is
+        // the one whose possessor points back at it. That round-trip is
+        // self-validating - a wrong manager or a wrong offset yields no
+        // character rather than the wrong character.
+        uintptr_t ResolveServerCharacter()
+        {
+            if (!g_serverCharMgrGlobal) return 0;
+
+            uintptr_t p = 0, mgr = 0, data = 0;
+            uint32_t  count = 0;
+            if (!ReadPtr(g_serverCharMgrGlobal, &p) || p < kMinPointer) return 0;
+            if (!ReadPtr(p, &mgr) || mgr < kMinPointer) return 0;
+            if (!ReadPtr(mgr + kOff_CharMgr_ListData, &data) || data < kMinPointer) return 0;
+            if (!Read32(mgr + kOff_CharMgr_ListCount, &count)) return 0;
+            if (!count || count > kCharList_MaxCount) return 0;
+
+            // Every miss here is a guarded read, and a guarded read that
+            // faults costs microseconds, not nanoseconds. A wrong count would
+            // otherwise turn one call into thousands of exceptions. The server
+            // list is small in practice; if the controlled body is not in the
+            // first slice, the candidate scan below still covers us.
+            constexpr uint32_t kServerWalkMax = 512;
+            if (count > kServerWalkMax) count = kServerWalkMax;
+
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                uintptr_t c = 0;
+                if (!ReadPtr(data + static_cast<uintptr_t>(i) * 8, &c)) continue;
+                if (IsLiveCharacter(c)) return c;
+            }
+            return 0;
+        }
+
         uintptr_t ServerHolder()
         {
-            const uintptr_t clientC = ResolveClientContainer();
-
             // The cache is trusted only while its container is still a live
             // character AND still derives to the very holder we cached - a
             // freed holder reads back as a sane bucket array, so identity is
@@ -874,10 +972,49 @@ namespace trinity::game
             const ULONGLONG now     = GetTickCount64();
             const uintptr_t cached  = g_serverHolder.load(std::memory_order_acquire);
             const uintptr_t cachedC = g_serverContainer.load(std::memory_order_acquire);
-            if (cached && now - g_serverTick.load(std::memory_order_relaxed) < 1000 &&
-                IsLiveCharacter(cachedC) && HolderForContainer(cachedC) == cached)
-                return cached;
+            if (now - g_serverTick.load(std::memory_order_relaxed) < 1000)
+            {
+                // A recent FAILURE counts too. Stamping the tick only on
+                // success meant an unresolvable server holder re-ran the
+                // whole walk on the very next frame - several hundred
+                // guarded reads per frame, every frame, for as long as the
+                // menu was open. That is the hang, and it is the second form
+                // of it: moving the walk below this check fixed the order
+                // and left the repetition.
+                if (!cached) return 0;
+                if (IsLiveCharacter(cachedC) && HolderForContainer(cachedC) == cached)
+                    return cached;
+            }
 
+            // This attempt counts against the window whichever way it goes.
+            g_serverTick.store(now, std::memory_order_relaxed);
+
+            // Direct route. It needs no hook to have fired, which is the whole
+            // point - 2.01.00's save loader never fires the commit hook - but
+            // it costs a walk of the server character list, so it runs only
+            // when the cache above has already declined.
+            //
+            // It was briefly placed ABOVE that cache check and made the menu
+            // unresponsive: the menu asks EditsPersist() every frame, so every
+            // frame walked several hundred characters through guarded reads.
+            // A cache that is consulted after the work it exists to avoid is
+            // not a cache.
+            const uintptr_t direct = ResolveServerCharacter();
+            if (direct)
+            {
+                const uintptr_t h = HolderForContainer(direct);
+                if (HolderLooksValid(h))
+                {
+                    g_serverHolder.store(h, std::memory_order_release);
+                    g_serverContainer.store(direct, std::memory_order_release);
+                    g_serverTick.store(now, std::memory_order_relaxed);
+                    return h;
+                }
+            }
+
+            // Only needed by the candidate scan below, so it is resolved here
+            // rather than at the top where it would cost the fast path.
+            const uintptr_t clientC = ResolveClientContainer();
             const uintptr_t clientH = CurrentHolder();
             if (!clientC || !clientH) return 0;
             const uint32_t want = HolderBucketCount(clientH);
@@ -1039,10 +1176,10 @@ namespace trinity::game
 
         // --- The commit hook: where the server container shows up at load ---
         void* __fastcall hkCommit(void* holder, void* err, void* container, void* items,
-                                  void* out, uint8_t a6, uint8_t a7)
+                                  uint8_t a5, uint8_t a6, void* a7, void* a8)
         {
             NoteContainer(container);
-            return oCommit(holder, err, container, items, out, a6, a7);
+            return oCommit(holder, err, container, items, a5, a6, a7, a8);
         }
 
         // --- The holder-insert hook: second capture path ---------------------
@@ -1113,7 +1250,7 @@ namespace trinity::game
             return 0;
         }
 
-        void* __fastcall hkSetExpandSlots(void* holder, int* outErr, void* a3,
+        void* __fastcall hkSetExpandSlots(void* holder, int* outErr,
                                           uint16_t type, uint16_t count)
         {
             const State& st = State::Get();
@@ -1128,7 +1265,7 @@ namespace trinity::game
                     count = expand;
                 }
             }
-            return oSetExpandSlots(holder, outErr, a3, type, count);
+            return oSetExpandSlots(holder, outErr, type, count);
         }
 
         // --- Used-count repair ------------------------------------------------
@@ -1338,7 +1475,15 @@ namespace trinity::game
         uintptr_t       freeAddr   = mem::FindPattern(kSig_InvFreePlacements);
         if (ctorAddr)   oItemValueCtor   = reinterpret_cast<ItemValueCtor_t>(ctorAddr);
         if (commitAddr) oCommitPlacement = reinterpret_cast<CommitPlacement_t>(commitAddr);
+        g_commitPlacementAddr = commitAddr;
         if (freeAddr)   oFreePlacements  = reinterpret_cast<FreePlacements_t>(freeAddr);
+        const uintptr_t bumpAddr = mem::FindPattern(kSig_InvBumpRevision);
+        if (bumpAddr) oBumpRevision = reinterpret_cast<BumpRevision_t>(bumpAddr);
+        else
+            LOG_WARN("inventory: holder revision publisher not found - added items land "
+                     "in the container but nothing is told to look again, so equipment "
+                     "and ammo may not notice them until an in-game inventory action.");
+
         // Self-check: freePlacements walks the vector with `imul rcx, rax, <stride>`,
         // so the live stride is right there in the code. If it ever disagrees with
         // what we plan against, the placement layout moved and every slot index we
@@ -1439,34 +1584,54 @@ namespace trinity::game
         if (!g_coreGlobal)
             LOG_WARN("inventory: core-global anchor not found - inventory appears only after the HUD queries an item count.");
 
+        // The server realm, reachable without waiting for a hook. See
+        // kSig_CharMgrServer for why this exists.
+        const uintptr_t srvAnchor = mem::FindPattern(kSig_CharMgrServer);
+        if (srvAnchor)
+            g_serverCharMgrGlobal = mem::ResolveRipAt(srvAnchor + kOff_CharMgrServer_Mov, 7);
+        if (g_serverCharMgrGlobal)
+            LOG("inventory: server character manager @ %p - edits persist without waiting for a transaction.",
+                reinterpret_cast<void*>(g_serverCharMgrGlobal));
+        else
+            LOG_WARN("inventory: server character-manager anchor not found - Add Item and "
+                     "durable dye stay locked until an in-game inventory transaction happens.");
+
         // Item defs (optional - the list still works with generic labels if
         // this fails, but names, categories and tier all hang off it).
         g_itemTableGlobal = FindTableGlobal(kStr_ItemInfoTable);
         if (!g_itemTableGlobal)
             LOG_WARN("inventory: item-info table not found - items show generic labels and no categories.");
 
-        // The category tree (ItemGroupInfo is at +0x20 in the contiguous global table array)
+        // These three used to fall back to a fixed offset from the iteminfo
+        // global (+0x20, +0x30, +0x18) when the string anchor failed. The
+        // fallbacks are gone, and deliberately not replaced with corrected
+        // numbers.
+        //
+        // In 2760 the string anchor resolves all three, and the addresses it
+        // returns are 0x146C2A050, 0x146C2A030 and 0x146C2A038 - a layout
+        // where ItemGroupInfo sits 0x18 above InventoryInfo, not the 0x08
+        // those deltas assumed. So the array was rearranged at some point and
+        // the fallbacks had quietly become wrong.
+        //
+        // That is the worst possible failure for these: they hand back a
+        // valid pointer to the WRONG table, so categories, icons and storage
+        // names come out subtly incorrect with nothing logged. A missing
+        // table says so in the log and costs some labels; a wrong one lies.
+        // If the string anchor ever stops working, the warning below is the
+        // outcome we want.
         g_grpTableGlobal = FindTableGlobal(kStr_ItemGroupInfoTable);
-        if (!g_grpTableGlobal && g_itemTableGlobal)
-            g_grpTableGlobal = g_itemTableGlobal + 0x20;
         if (!g_grpTableGlobal)
             LOG_WARN("inventory: ItemGroupInfo table not found - items are not grouped.");
         else
             LOG("inventory: ItemGroupInfo table resolved @ %p.", reinterpret_cast<void*>(g_grpTableGlobal));
 
-        // Icon sprite names (stringinfo is at +0x30 in the contiguous global table array)
         g_strTableGlobal = FindTableGlobal(kStr_StringInfoTable);
-        if (!g_strTableGlobal && g_itemTableGlobal)
-            g_strTableGlobal = g_itemTableGlobal + 0x30;
         if (!g_strTableGlobal)
             LOG_WARN("inventory: stringinfo table not found - no item or category icons.");
         else
             LOG("inventory: stringinfo table resolved @ %p.", reinterpret_cast<void*>(g_strTableGlobal));
 
-        // Storage names (InventoryInfo is at +0x18 in the contiguous global table array)
         g_invTableGlobal = FindTableGlobal(kStr_InventoryInfoTable, /*indirect=*/true);
-        if (!g_invTableGlobal && g_itemTableGlobal)
-            g_invTableGlobal = g_itemTableGlobal + 0x18;
         if (!g_invTableGlobal)
             LOG_WARN("inventory: InventoryInfo table not found - storages show engine keys.");
         else
@@ -1514,11 +1679,24 @@ namespace trinity::game
         return CurrentHolder() != 0;
     }
 
+    // Wall clock in milliseconds, at a resolution GetTickCount64 does not
+    // have - a 15 ms tick cannot measure a 15 ms walk.
+    static double NowMs()
+    {
+        LARGE_INTEGER f{}, c{};
+        QueryPerformanceFrequency(&f);
+        QueryPerformanceCounter(&c);
+        return f.QuadPart ? (1000.0 * static_cast<double>(c.QuadPart) /
+                             static_cast<double>(f.QuadPart))
+                          : 0.0;
+    }
+
     static void RefreshImpl(bool force)
     {
         const ULONGLONG now = GetTickCount64();
-        if (!force && now - g_lastRefresh < 120) return; // ~8 Hz is plenty for a menu
+        if (!force && now - g_lastRefresh < g_refreshBudget) return;
         g_lastRefresh = now;
+        const double startMs = NowMs();
 
         g_storages.clear();
 
@@ -1652,6 +1830,24 @@ namespace trinity::game
             });
 
             g_storages.push_back(std::move(store));
+        }
+
+        // Cost sets the rate. The menu asks every frame; what it may not do is
+        // spend the frame here. A tenth is the whole rule - on a small
+        // inventory the 120 ms floor wins and nothing changes, on a large one
+        // the walk backs itself off until the menu is responsive again.
+        {
+            const double took = NowMs() - startMs;
+            const ULONGLONG want = static_cast<ULONGLONG>(took * 10.0);
+            g_refreshBudget = want > 120 ? want : 120;
+            static bool s_warned = false;
+            if (!s_warned && took > 50.0)
+            {
+                s_warned = true;
+                LOG_WARN("inventory: list walk took %.0f ms - refreshing every %llu ms "
+                         "instead of 120 so the menu stays responsive.",
+                         took, g_refreshBudget);
+            }
         }
 
         // Curated order (kStorageStyle), then by type so unlisted storages still
@@ -1898,8 +2094,45 @@ namespace trinity::game
             LOG("money/find: %d candidate(s) for %lld.", hits, static_cast<long long>(shown));
     }
 
+    namespace
+    {
+        // Refuse the crime itself, rather than zeroing what it costs.
+        //
+        // See kSig_CrimeGate. The table edits below stay as a fallback for a
+        // build where this does not resolve, but they were never the answer:
+        // they cannot reach theft at all, and they mutate shared definition
+        // data another mod can - and does - overwrite. NeverWanted.asi
+        // rewrites TribeInfo every second from a background thread, so with
+        // both installed its zeroes win over Trinity's sentinel within a
+        // second of every toggle.
+        using CrimeGate_t = bool(__fastcall*)(void*, void*, void*, const void*, uint8_t);
+        CrimeGate_t oCrimeGate = nullptr;
+        void*       g_crimeGateTarget = nullptr;
+        std::atomic<bool> g_crimeGateOn{ false };
+
+        bool __fastcall hkCrimeGate(void* actor, void* target, void* entity,
+                                    const void* tag, uint8_t category)
+        {
+            if (g_crimeGateOn.load(std::memory_order_relaxed)) return false;
+            return oCrimeGate(actor, target, entity, tag, category);
+        }
+    }
+
     bool Inventory::SetNoBounty(bool enable)
     {
+        // Installed on first use, same as the tables below.
+        static bool s_gateTried = false;
+        if (!s_gateTried)
+        {
+            s_gateTried = true;
+            if (mem::InstallHook("world: crime gate", kSig_CrimeGate,
+                                 "No Bounty falls back to zeroing bounty prices only",
+                                 &hkCrimeGate, &oCrimeGate, &g_crimeGateTarget))
+                LOG("world: crime gate hooked @ %p - crimes are refused, not just "
+                    "priced at zero.", g_crimeGateTarget);
+        }
+        g_crimeGateOn.store(enable, std::memory_order_relaxed);
+
         // Resolved lazily: the table is not needed unless the feature is used.
         static uintptr_t s_wantedGlobal = 0;
         static bool      s_looked = false;
@@ -1922,11 +2155,13 @@ namespace trinity::game
 
         static std::vector<int64_t> s_orig;
         static std::vector<uint8_t> s_origBlocked;
+        static std::vector<uint8_t> s_origTargetPrice;
         static std::vector<char>    s_captured;
         if (s_captured.size() != count)
         {
             s_orig.assign(count, 0);
             s_origBlocked.assign(count, 0);
+            s_origTargetPrice.assign(count, 0);
             s_captured.assign(count, 0);
         }
 
@@ -1944,11 +2179,25 @@ namespace trinity::game
                     uint8_t blocked = 0;
                     if (!Read64(def + kOff_WantedDef_IncreasePrice, &orig)) continue;
                     Read8(def + kOff_WantedDef_IsBlocked, &blocked);
+                    uint8_t useTarget = 0;
+                    Read8(def + kOff_WantedDef_UseTargetPrice, &useTarget);
                     s_orig[row] = orig;
                     s_origBlocked[row] = blocked;
+                    s_origTargetPrice[row] = useTarget;
                     s_captured[row] = 1;
                 }
                 if (Write64(def + kOff_WantedDef_IncreasePrice, 0)) ++changed;
+                // Zeroing the price covers a crime whose bounty comes FROM the
+                // row. It does not cover one whose bounty is computed from what
+                // was taken - and _useTargetPrice is the flag that says which.
+                // That matches the reported behaviour exactly: attacking an NPC
+                // stopped costing bounty while theft still did.
+                //
+                // Clearing the flag sends those rows back to _increasePrice,
+                // which is already zero. Both values are captured above and put
+                // back when the toggle goes off, so this stays a reversible
+                // data-table edit like the rest of No Bounty.
+                Write8(def + kOff_WantedDef_UseTargetPrice, 0);
                 // _isBlocked was tried here and did nothing: the poster and the
                 // region marker still appeared with it raised on every row. It
                 // is not the gate, so the write is gone rather than left in as
@@ -1959,6 +2208,7 @@ namespace trinity::game
                 if (Write64(def + kOff_WantedDef_IncreasePrice,
                             static_cast<uint64_t>(s_orig[row])))
                     ++changed;
+                Write8(def + kOff_WantedDef_UseTargetPrice, s_origTargetPrice[row]);
             }
         }
         // Zeroing the price alone left the crime registering, so also clear the
@@ -1991,10 +2241,22 @@ namespace trinity::game
                     s_origCrime.assign(tcount, 0);
                     s_tribeCaptured.assign(tcount, 0);
                 }
+                // Two ways to clear nothing, and the log could not tell them
+                // apart: every row unresolvable, or every row already zero. On
+                // 2850 this reported "0 tribe(s)" where 2760 reported 372, and
+                // the offset turned out to be right - so the useful question
+                // was which of the two happened, and the line as written could
+                // not answer it. Counting both costs nothing and settles it in
+                // one run instead of one round trip.
+                int unresolved = 0, zeroed = 0;
                 for (uint32_t row = 0; row < tcount; ++row)
                 {
                     uintptr_t def = 0;
-                    if (!DefForRow(s_tribeGlobal, static_cast<uint16_t>(row), &def)) continue;
+                    if (!DefForRow(s_tribeGlobal, static_cast<uint16_t>(row), &def))
+                    {
+                        ++unresolved;
+                        continue;
+                    }
                     if (enable)
                     {
                         if (!s_tribeCaptured[row])
@@ -2004,8 +2266,9 @@ namespace trinity::game
                             s_origCrime[row] = orig;
                             s_tribeCaptured[row] = 1;
                         }
-                        if (s_origCrime[row] != 0 &&
-                            Write8(def + kOff_TribeDef_WantedCrimeType, 0))
+                        if (s_origCrime[row] == kTribeCrime_None) ++zeroed;
+                        else if (Write8(def + kOff_TribeDef_WantedCrimeType,
+                                        kTribeCrime_None))
                             ++tribes;
                     }
                     else if (s_tribeCaptured[row])
@@ -2013,6 +2276,21 @@ namespace trinity::game
                         if (Write8(def + kOff_TribeDef_WantedCrimeType, s_origCrime[row]))
                             ++tribes;
                     }
+                }
+
+                if (enable && tribes == 0 && tcount > 0)
+                {
+                    // Say which of the two it was. Unresolved rows mean the
+                    // table's def pointers are not populated - toggling again
+                    // once the world is fully up would then work. All-zero
+                    // means the field is right and the data simply carries no
+                    // crime type, which is not something to keep chasing.
+                    LOG_WARN("world: no tribe crime types cleared - %d of %u row(s) had no "
+                             "definition, %d read zero.%s",
+                             unresolved, tcount, zeroed,
+                             unresolved == static_cast<int>(tcount)
+                                 ? " Try toggling No Bounty again after the world finishes loading."
+                                 : "");
                 }
             }
         }
@@ -2158,7 +2436,7 @@ namespace trinity::game
                 }
 
                 int err = 0;
-                oSetExpandSlots(reinterpret_cast<void*>(holder), &err, nullptr, type, expand);
+                oSetExpandSlots(reinterpret_cast<void*>(holder), &err, type, expand);
                 if (err == 0) any = true;
             }
             return any;
@@ -2507,6 +2785,9 @@ namespace trinity::game
 
         // The holder bucket this item belongs in, chosen the way the game
         // chooses it: the item def's own default storage vs bucket+0x10.
+        // The item's DEFAULT storage, which is what the engine's own add path
+        // plans against (0x142A6FD3B) - see the note in offsets.h for why this
+        // deliberately ignores the holder's item->storage map.
         uintptr_t BucketForItem(uintptr_t holder, uintptr_t def)
         {
             uint16_t want = 0;
@@ -2543,6 +2824,86 @@ namespace trinity::game
             if (!ReadPtr(sub + kOff_Sub_IdAllocator, &alloc) || alloc < kMinPointer) return 0;
             return alloc;
         }
+
+        // WHICH branch refused the commit.
+        //
+        // The engine builds its error codes at runtime into globals, so the
+        // number in the log cannot be traced back to a branch by reading the
+        // binary - which is why three rounds of static analysis have not
+        // named it. But the codes are readable at the address the code loads
+        // them from, and every direct refusal in CommitPlacement is
+        //     8B 05 <d32>   mov eax, [rip+d32]
+        //     41 89 06      mov [r14], eax
+        // so walking the body and resolving each of those globals names the
+        // branch outright. A miss is informative too: it means the refusal
+        // came out of one of the subcalls, so we then walk each E8 target and
+        // check its error globals the same way.
+        //
+        // Diagnostic only, and pattern-relative rather than offset-relative,
+        // so it costs nothing when commits succeed and cannot go stale into
+        // a wrong answer - it either matches or reports that it did not.
+        int ScanErrGlobals(uintptr_t fn, size_t span, uint32_t code, bool needStore)
+        {
+            if (!fn) return 0;
+            const auto* p = reinterpret_cast<const uint8_t*>(fn);
+            int idx = 0;
+            for (size_t i = 0; i + 10 < span; ++i)
+            {
+                if (p[i] != 0x8B || p[i + 1] != 0x05) continue;
+                if (needStore &&
+                    !(p[i + 6] == 0x41 && p[i + 7] == 0x89 && p[i + 8] == 0x06))
+                    continue;
+                int32_t disp = 0;
+                memcpy(&disp, p + i + 2, sizeof(disp));
+                uint32_t v = 0;
+                ++idx;
+                if (Read32(fn + i + 6 + static_cast<uintptr_t>(disp), &v) && v == code)
+                    return idx;
+            }
+            return 0;
+        }
+
+        // "branch N" for a direct refusal, "call N branch M" for a subcall's.
+        void DescribeCommitError(uint32_t code, char* out, size_t cap)
+        {
+            out[0] = 0;
+            if (!g_commitPlacementAddr || !code) return;
+            constexpr size_t kBody = 0x100;   // 0x142077410..0x1420774E5 in 2760
+            const int direct = ScanErrGlobals(g_commitPlacementAddr, kBody, code, true);
+            if (direct) { snprintf(out, cap, "branch %d", direct); return; }
+
+            const auto* p = reinterpret_cast<const uint8_t*>(g_commitPlacementAddr);
+            int callIdx = 0;
+            for (size_t i = 0; i + 5 < kBody; ++i)
+            {
+                if (p[i] != 0xE8) continue;
+                int32_t rel = 0;
+                memcpy(&rel, p + i + 1, sizeof(rel));
+                const uintptr_t t = g_commitPlacementAddr + i + 5 + static_cast<uintptr_t>(rel);
+                ++callIdx;
+                const int hit = ScanErrGlobals(t, 0x900, code, false);
+                if (hit)
+                {
+                    snprintf(out, cap, "call %d (%p) branch %d", callIdx,
+                             reinterpret_cast<void*>(t), hit);
+                    return;
+                }
+            }
+            snprintf(out, cap, "no owning branch found");
+        }
+
+        // What the last refused commit was handed. Written inside the __try
+        // and printed outside it, because a LOG from in there would be a call
+        // into the C runtime while an SEH frame is live.
+        struct CommitDiag
+        {
+            uint16_t bucketType = 0, slotIdx = 0, p08 = 0, p0A = 0;
+            int64_t  p10 = 0;
+            uint16_t head[16] = {};   // placement +0x00 .. +0x1F
+            uint16_t tail[8]  = {};   // placement +0xD0 .. +0xDF
+            bool     valid = false;
+        };
+        CommitDiag g_lastCommitDiag;
 
         // Build + plan + commit + free, with the realm already switched by the
         // caller. POD locals only: __try/__except is illegal in a function that
@@ -2596,23 +2957,98 @@ namespace trinity::game
                         const uint16_t slotIdx =
                             *reinterpret_cast<uint16_t*>(p + kOff_Placement_SlotIdx);
                         int err2 = 0;
-                        // 3rd arg: the game's own commit loop leaves the CONTAINER
-                        // in r8 here - match it rather than passing null.
+                        // The engine's own loop over this same planner's output
+                        // (0x142A6FE30) passes the holder, an error slot, the
+                        // placement, and the slot the planner chose. Nothing
+                        // else: it re-finds the bucket from the item's own
+                        // definition, so there is no bucket type to hand it and
+                        // no tier floor to guess at.
+                        uint16_t bucketType = 0;   // logged on refusal only
+                        mem::Read16(bucket + kOff_InvBucket_Type, &bucketType);
+
                         oCommitPlacement(reinterpret_cast<void*>(holder), &err2,
-                                         reinterpret_cast<void*>(container),
                                          reinterpret_cast<void*>(p), slotIdx);
                         if (err2 == 0) ++committed;
-                        else if (!firstErr2) firstErr2 = err2;
+                        else if (!firstErr2)
+                        {
+                            firstErr2 = err2;
+                            // Name the inputs, not just the code. The engine
+                            // computes its error codes at runtime from an
+                            // obfuscated table, so the number alone cannot be
+                            // traced back to a branch statically. Six branches
+                            // can write it; the two tier checks are decided by
+                            // placement+0x0A against the item's own minimum,
+                            // and the other three are subcalls whose only
+                            // input is this placement. Printing the record
+                            // tells us which, in one run.
+                            uint16_t p08 = 0, p0A = 0;
+                            int64_t  p10 = 0;
+                            Read16(p + 0x08, &p08);
+                            Read16(p + 0x0A, &p0A);
+                            Read64(p + 0x10, &p10);
+                            // The slot index read at +0xD8 came back as 296 for
+                            // four different items, which an allocated slot
+                            // cannot do - so that offset is describing something
+                            // else now. Dump the head of the record and the
+                            // window around +0xD8 so the real field can be
+                            // identified from one run instead of guessed at.
+                            for (int w = 0; w < 16; ++w)
+                                Read16(p + static_cast<uintptr_t>(w) * 2,
+                                       &g_lastCommitDiag.head[w]);
+                            for (int w = 0; w < 8; ++w)
+                                Read16(p + 0xD0 + static_cast<uintptr_t>(w) * 2,
+                                       &g_lastCommitDiag.tail[w]);
+                            g_lastCommitDiag.bucketType = bucketType;
+                            g_lastCommitDiag.slotIdx    = slotIdx;
+                            g_lastCommitDiag.p08        = p08;
+                            g_lastCommitDiag.p0A        = p0A;
+                            g_lastCommitDiag.p10        = p10;
+                            g_lastCommitDiag.valid      = true;
+                        }
                     }
                 }
             }
             __except (EXCEPTION_EXECUTE_HANDLER) { excepted = true; }
+
+            // Tell the holder it changed. The engine does this at 0x142A6FF8E
+            // right after the same insert loop; skipping it leaves every
+            // subsystem caching a view of this container - the equipment
+            // component's ammo watcher among them - on its previous answer.
+            // Separate __try because the loop above may have left through its
+            // own handler and this still has to run.
+            if (committed > 0 && oBumpRevision)
+            {
+                __try { oBumpRevision(reinterpret_cast<void*>(holder)); }
+                __except (EXCEPTION_EXECUTE_HANDLER) {}
+            }
 
             // Name the exact stage on failure - "PARTIAL (server=0 client=0)"
             // alone proved undebuggable (frequent in the field, cleared by a
             // save/reload, four possible silent causes).
             if (committed == 0)
             {
+                if (g_lastCommitDiag.valid)
+                {
+                    LOG_WARN("inventory: add[%s] %u: commit refused - bucketType=%u "
+                             "slotIdx=%u placement{+08=%u +0A=%u +10=%lld} err=0x%X",
+                             realm, typeId, g_lastCommitDiag.bucketType,
+                             g_lastCommitDiag.slotIdx, g_lastCommitDiag.p08,
+                             g_lastCommitDiag.p0A,
+                             static_cast<long long>(g_lastCommitDiag.p10),
+                             static_cast<unsigned>(firstErr2));
+                    char hx[256]; int o = 0;
+                    for (int w = 0; w < 16; ++w)
+                        o += snprintf(hx + o, sizeof(hx) - o, "%04X ", g_lastCommitDiag.head[w]);
+                    LOG_WARN("inventory:   placement +00: %s", hx);
+                    o = 0;
+                    for (int w = 0; w < 8; ++w)
+                        o += snprintf(hx + o, sizeof(hx) - o, "%04X ", g_lastCommitDiag.tail[w]);
+                    LOG_WARN("inventory:   placement +D0: %s", hx);
+                    char who[96];
+                    DescribeCommitError(static_cast<uint32_t>(firstErr2), who, sizeof(who));
+                    if (*who) LOG_WARN("inventory:   refused by %s", who);
+                    g_lastCommitDiag.valid = false;
+                }
                 if (excepted)
                     LOG_WARN("inventory: add[%s] %u: exception (built=%d planned=%d)",
                              realm, typeId, built ? 1 : 0, planned ? 1 : 0);
@@ -2791,7 +3227,14 @@ namespace trinity::game
                 : false;
 
             if (okServer && okClient)
+            {
+                // Silence used to mean success here. It also meant "never
+                // attempted", and the two are not the same thing to anyone
+                // reading a log after the fact.
+                LOG("inventory: add item %u x%lld OK (both realms).",
+                    typeId, static_cast<long long>(qty));
                 return true;
+            }
 
             // A half-add is worth shouting about: server-only shows up after a
             // reload, client-only gets reconciled away. The failing side has

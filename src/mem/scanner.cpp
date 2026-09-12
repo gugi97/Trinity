@@ -297,6 +297,35 @@ namespace trinity::mem
         return Scan(pattern, mod, maxCount, /*allowDataFallback=*/true).size();
     }
 
+    uintptr_t FunctionEntry(uintptr_t interior)
+    {
+        if (!interior)
+            return 0;
+
+        DWORD64 imageBase = 0;
+        auto* rf = RtlLookupFunctionEntry(static_cast<DWORD64>(interior), &imageBase, nullptr);
+        if (!rf || !imageBase)
+            return 0;
+
+        // UNWIND_INFO: version:3 | flags:5, prologue size, code count, frame
+        // reg/offset, then CountOfCodes 2-byte codes padded to an even count.
+        // UNW_FLAG_CHAININFO means a RUNTIME_FUNCTION for the primary follows.
+        // The guard bounds a chain that a corrupted or hostile table could
+        // otherwise make cyclic; real chains are one or two links deep.
+        constexpr uint8_t kChainInfo = 0x4;
+        for (int guard = 0; guard < 8; ++guard)
+        {
+            const auto* info = reinterpret_cast<const uint8_t*>(imageBase + rf->UnwindInfoAddress);
+            if (((info[0] >> 3) & kChainInfo) == 0)
+                return static_cast<uintptr_t>(imageBase + rf->BeginAddress);
+
+            const size_t codes = (static_cast<size_t>(info[2]) + 1) & ~static_cast<size_t>(1);
+            rf = reinterpret_cast<PRUNTIME_FUNCTION>(
+                const_cast<uint8_t*>(info + 4 + codes * 2));
+        }
+        return 0;
+    }
+
     void LogModuleLayout()
     {
         const ModuleRegion& mod = GameModule();

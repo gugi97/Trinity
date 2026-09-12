@@ -72,6 +72,29 @@ namespace trinity::mem
         return FindPatternIf(pattern, GameModule(), visit, ctx);
     }
 
+    // The start of the function containing `interior`, via the PE's unwind
+    // tables (RtlLookupFunctionEntry).
+    //
+    // Why this exists. A signature normally keys on a function's PROLOGUE,
+    // and TU 2.01.00 showed how weak that is: the compiler rescheduled and
+    // re-registered code across the whole image, so prologues changed while
+    // the functions themselves were untouched. What survives a recompile is
+    // what a function MEANS - the struct offsets it reads, the constants it
+    // compares against - and that lives in the body, not at the entry.
+    //
+    // So a caller can match a short, meaning-bearing pattern anywhere inside
+    // a function and ask Windows where that function begins, instead of
+    // betting on the exact shape of its register saves. The unwind tables are
+    // the same data the OS uses to unwind exceptions, so they are correct by
+    // construction and stay correct when the compiler moves things around.
+    //
+    // Chained unwind entries are followed to the primary one: the packer's
+    // region is full of functions split into a main entry plus separated
+    // epilogue entries, and only the primary is the real function start.
+    // Returns 0 if the address has no unwind data at all, which for this
+    // image means the caller matched something that is not inside a function.
+    uintptr_t FunctionEntry(uintptr_t interior);
+
     // Log a one-line summary of the module's committed regions (base, size,
     // number of readable/executable pages). Diagnostic aid.
     void LogModuleLayout();

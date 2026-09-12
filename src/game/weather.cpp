@@ -8,6 +8,7 @@
 #include "../core/logger.h"
 #include "../core/state.h"
 #include "../mem/hooks.h"
+#include "../mem/safe_memory.h"
 
 namespace trinity::game
 {
@@ -36,20 +37,56 @@ namespace trinity::game
         // `mov rdi, rdx` keeps the struct base across the first `call [rax+8]`,
         // and that call passes rdx unchanged with r8d = 4 - which is also how we
         // know the first field sits at +0x00.
-        // NOTE: the trailing `call` displacement is deliberately NOT wildcarded.
-        // It is what makes this unique - wildcard it and the pattern falls back
-        // to matching all fifteen sibling deserialisers that share this
-        // prologue. The cost is that a patch which moves either function breaks
-        // the match, but that failure is LOUD (signature not found) rather than
-        // silent, and Install() now refuses on ambiguity too.
-        constexpr const char* kSig_WeatherDeserialize =
-            "48 89 5C 24 08 57 48 83 EC 60 48 8B 01 41 B8 04 00 00 00 "
-            "48 8B FA 48 8B D9 FF 50 08 84 C0 75 4D 48 8D 0D ? ? ? "
-            "? 48 89 4C 24 58 4C 8D 0D ? ? ? ? C7 44 24 50 06 00 "
-            "00 00 33 C0 89 44 24 48 B1 01 4C 89 4C 24 40 89 44 24 38 "
-            "4C 89 4C 24 30 4C 89 4C 24 28 4C 89 4C 24 20 E8 B0 A2 02 "
-            "FF";
+        //
+        // This function is NOT identified by a byte pattern any more, and the
+        // reason is worth keeping. Fifteen sibling deserialisers share its
+        // exact prologue; the old signature separated them by the trailing
+        // call's baked displacement. TU 2.01.00 moved that callee, the pattern
+        // matched zero times, and Weather disabled itself - printing
+        // "ambiguous", which was wrong and would have sent the next person
+        // hunting for a second match that did not exist.
+        //
+        // What actually identifies this function is the data it references:
+        // its own field names. Every string beginning with
+        // "GameGlobalEffectInfo_Weather" (_precipitation, _cloudiness,
+        // _windSpeed, _snowAmount and the rest) is referenced from here and
+        // nowhere else - 46 of them in 2760, every one landing in the same
+        // function. A compiler can reschedule instructions and rename
+        // registers, but it cannot make this function stop naming its fields.
+        constexpr const char* kStr_WeatherFieldPrefix = "GameGlobalEffectInfo_Weather";
+        // How many references must agree before we hook. One would do in
+        // practice; requiring several means a single stray lea at an
+        // unrelated site can never decide this on its own.
+        constexpr int kWeatherRefsRequired = 8;
 
+        struct WeatherHunt
+        {
+            uintptr_t fn     = 0;   // the function the references agree on
+            int       votes  = 0;   // references landing in it
+            int       strays = 0;   // references landing anywhere else
+        };
+
+        // Called for every `lea rcx, [rip+disp]` in executable memory.
+        // Accepts none of them (always returns false) so the scan runs to
+        // completion and every reference is counted.
+        bool VisitWeatherRef(uintptr_t match, void* ctx)
+        {
+            auto* h = static_cast<WeatherHunt*>(ctx);
+            const uintptr_t target = mem::ResolveRipAt(match, 7);
+            char name[40] = {};
+            if (!mem::ReadCString(target, name, sizeof(name)))
+                return false;
+            if (std::strncmp(name, kStr_WeatherFieldPrefix,
+                             std::strlen(kStr_WeatherFieldPrefix)) != 0)
+                return false;
+
+            const uintptr_t fn = mem::FunctionEntry(match);
+            if (!fn) return false;
+            if (!h->fn)      h->fn = fn;
+            if (fn == h->fn) ++h->votes;
+            else             ++h->strays;
+            return false;
+        }
         // The fields the override drives, read off the deserialiser. The full
         // 0xB8-byte layout is known (see weather.h); these are the ones that
         // actually change what you see out of the window.
@@ -283,21 +320,27 @@ namespace trinity::game
         for (int f = 0; f < FCount; ++f)
             g_authoredMax[f].store(0.0f, std::memory_order_relaxed);
 
-        // Refuse rather than pick one. InstallHook's default is to warn and hook
-        // the first match, which is right for a read-only hook and wrong here:
-        // this one hands us a pointer we then WRITE to, so a second match does
-        // not mean "close enough", it means the pattern no longer identifies the
-        // function it was derived from. That exact mistake shipped once already.
-        if (mem::CountMatches(kSig_WeatherDeserialize, 4) != 1)
+        // Find the function by the field names it references, and let the
+        // references vote. This hands us a pointer we then WRITE to, so a
+        // disagreement means the search no longer identifies one function,
+        // and we refuse rather than hook a guess.
+        WeatherHunt hunt{};
+        mem::FindPatternIf("48 8D 0D ?? ?? ?? ??", &VisitWeatherRef, &hunt);
+        if (hunt.votes < kWeatherRefsRequired)
         {
-            LOG_WARN("weather: preset deserialiser is ambiguous - Weather disabled rather "
-                     "than hook a guess.");
+            LOG_WARN("weather: preset deserialiser not identified (%d of %d needed "
+                     "field-name references agreed) - Weather disabled rather than "
+                     "hook a guess.", hunt.votes, kWeatherRefsRequired);
             return false;
         }
+        if (hunt.strays)
+            LOG_WARN("weather: %d field-name reference(s) land somewhere other than the "
+                     "%d that agree - hooking the majority, but this is worth a look.",
+                     hunt.strays, hunt.votes);
 
-        if (!mem::InstallHook("weather: preset deserialiser", kSig_WeatherDeserialize,
-                              "Weather control disabled",
-                              &hkDeserialize, &g_origDeserialize, &g_deserializeTarget))
+        if (!mem::InstallHookAt("weather: preset deserialiser", hunt.fn,
+                                "Weather control disabled",
+                                &hkDeserialize, &g_origDeserialize, &g_deserializeTarget))
             return false;
 
         LOG("weather: hooked the preset deserialiser - presets are captured as the world loads.");

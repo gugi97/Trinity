@@ -181,9 +181,39 @@ namespace trinity
             case Error: tag = "ERR "; break;
             default: break;
             }
+            // Collapse an identical line repeating back-to-back.
+            //
+            // Every line is flushed, deliberately - a crash mid-hook must not
+            // eat the last one. The cost of that is paid per line, so a burst
+            // turns into a burst of synchronous disk writes on whatever thread
+            // is logging, which for most of this mod is the game thread. One
+            // failing Add Item in the 2.01.00 session wrote 2542 warnings and
+            // therefore 2542 flushes, from a single keypress.
+            //
+            // Suppressing the repeat costs nothing when lines differ, which is
+            // the normal case, and the count is emitted before the next line
+            // so nothing is silently lost.
+            if (l.text == s_lastText)
+            {
+                ++s_lastRepeats;
+                return;
+            }
+            if (s_lastRepeats)
+            {
+                std::fprintf(s_fileFp, "%s [INFO] (previous line repeated %u more time(s))\n",
+                             l.stamp.c_str(), s_lastRepeats);
+                s_lastRepeats = 0;
+            }
+            s_lastText = l.text;
+
             std::fprintf(s_fileFp, "%s [%s] %s\n", l.stamp.c_str(), tag, l.text.c_str());
             std::fflush(s_fileFp); // a crash mid-hook must not eat the last line
         }
+
+        // Repeat suppression state for EmitFile. Guarded by Mutex() like
+        // every other field here.
+        static inline std::string s_lastText;
+        static inline unsigned    s_lastRepeats = 0;
 
         static std::mutex& Mutex()
         {

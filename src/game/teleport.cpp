@@ -53,10 +53,9 @@ namespace trinity::game
         // Last-seen map destination. Captured from the game's own destination
         // copy function (sub_BE3710), so it tracks whatever the world map / quest
         // objective system considers the current destination.
-        std::atomic<float>    g_destX{0.0f}, g_destY{0.0f}, g_destZ{0.0f};
-        std::atomic<float>    g_destOriginX{0.0f}, g_destOriginY{0.0f}, g_destOriginZ{0.0f};
-        std::atomic<uint32_t> g_destSequence{0};
-        std::atomic<bool>     g_destValid{false};
+
+
+
         uintptr_t             g_markerOriginAddress = 0;
 
         // Queued warp request - written by the menu, consumed by the movement
@@ -117,39 +116,37 @@ namespace trinity::game
             return false;
         }
 
+        // Defined further down, next to the rest of the marker plumbing.
+        bool ReadLiveOrigin(float origin[3]);
+
         struct DestinationSnapshot
         {
             float x, y, z;
             float originX, originY, originZ;
         };
 
+        // The marker the player placed, read live off the nav component. No
+        // hook and no cached copy: only the request handler ever writes it, so
+        // reading it when asked cannot be stale, cannot miss a marker placed
+        // before Trinity loaded, and cannot survive the player clearing one.
         bool LoadDestinationSnapshot(DestinationSnapshot* out)
         {
-            if (!out || !g_destValid.load(std::memory_order_acquire)) return false;
-            for (int attempt = 0; attempt < 8; ++attempt)
-            {
-                const uint32_t before = g_destSequence.load(std::memory_order_acquire);
-                if (before & 1) continue;
+            if (!out) return false;
+            const uintptr_t owner = Player::CharacterOwner(0);
+            if (!owner) return false;
+            uintptr_t actor = 0, nav = 0;
+            if (!mem::ReadPtr(owner + kOff_Owner_Actor, &actor) || actor < kMinPointer) return false;
+            if (!mem::ReadPtr(actor + kOff_Actor_NavComp, &nav) || nav < kMinPointer) return false;
 
-                DestinationSnapshot value{
-                    g_destX.load(std::memory_order_relaxed),
-                    g_destY.load(std::memory_order_relaxed),
-                    g_destZ.load(std::memory_order_relaxed),
-                    g_destOriginX.load(std::memory_order_relaxed),
-                    g_destOriginY.load(std::memory_order_relaxed),
-                    g_destOriginZ.load(std::memory_order_relaxed),
-                };
-                const uint32_t after = g_destSequence.load(std::memory_order_acquire);
-                if (before == after && !(after & 1) &&
-                    std::isfinite(value.x) && std::isfinite(value.y) &&
-                    std::isfinite(value.z) && std::isfinite(value.originX) &&
-                    std::isfinite(value.originY) && std::isfinite(value.originZ))
-                {
-                    *out = value;
-                    return true;
-                }
-            }
-            return false;
+            float v[3]{}, origin[3]{};
+            if (!ReadVec3(nav + kOff_NavComp_Dest, v) || !ReadLiveOrigin(origin)) return false;
+            if (!std::isfinite(v[0]) || !std::isfinite(v[1]) || !std::isfinite(v[2])) return false;
+            // Cleared marker: the handler writes three zeroes, and warping to
+            // the world origin is never what anyone meant.
+            if (v[0] == 0.0f && v[1] == 0.0f && v[2] == 0.0f) return false;
+
+            *out = DestinationSnapshot{ v[0], v[1], v[2], origin[0], origin[1], origin[2] };
+            return true;
         }
 
         std::atomic<int>      g_warpPending{0}; // -1 = publishing, 0 = none, >0 = frames remaining
@@ -340,10 +337,10 @@ namespace trinity::game
         // destination; the function copies it into the marker manager. We hook
         // the prologue, read r8, and record the coordinates. The return type is
         // unknown but the rest of the mod never needs it; char is a safe ABI.
-        using DestinationUpdate_t = char(__fastcall*)(uint64_t rcx, uint64_t rdx,
-                                                      uint64_t r8, uint64_t r9);
-        DestinationUpdate_t oDestinationUpdate = nullptr;
-        void* g_destinationUpdateTarget = nullptr;
+        // THREE arguments. Both engine call sites (0x140674D78, 0x140674F62)
+        // load rcx/rdx/r8 only, and the function overwrites r9d before
+        // reading it.
+
 
         // A travel request queued from the menu thread, fired once on the game
         // thread inside hkMoveUpdate (matching how the game itself calls it).
@@ -1004,11 +1001,55 @@ namespace trinity::game
         // The local player's move-owner (physics proxy), republished every
         // movement tick by hkMoveUpdate - which the mod already relies on to
         // track the player's own position, so it is a proven player anchor. The
-        // loco-stepper's component caches the same pointer at +0x298, so
-        // matching it there isolates the player from every other character the
-        // stepper fires for. 0 until the first movement tick / at the menu.
+        // loco-stepper's component caches that same pointer somewhere in its
+        // own body, and matching it there isolates the player from every other
+        // character the stepper fires for. 0 until the first movement tick /
+        // at the menu.
         std::atomic<uintptr_t> g_playerMoveOwner{0};
-        constexpr uintptr_t    kOff_MoveComp_MoveOwner = 0x298;
+
+        // Where the component caches it. This was a hard-coded 0x298 and TU
+        // 2.01.00 moved it, which disabled Free Flight while every neighbouring
+        // feature kept working - Super Run does not need player identity at all
+        // and Super Jump reads the owner directly - so nothing in the log said
+        // a word. A constant nobody can check is the worst kind: it fails
+        // silently and it fails again every patch.
+        //
+        // So it is measured instead. The first time the stepper runs with a
+        // known player anchor, we look for that exact pointer inside the
+        // component and remember where we found it. An NPC's component simply
+        // will not contain it, so a miss costs one scan and we try again on the
+        // next call; the search ends the first time the player's own component
+        // comes through. Nothing is written, and until it resolves Free Flight
+        // is inert rather than acting on a guess.
+        constexpr uintptr_t kMoveOwnerScanEnd  = 0x600; // bytes of component to search
+        // Where it was last seen: 0x298 before TU 2.01.00, 0x2B8 in 2760.
+        // Tried first so the usual case is one read rather than up to 192.
+        constexpr uintptr_t kMoveOwnerOffGuess = 0x2B8;
+        // The stepper runs for EVERY character EVERY frame, and an NPC's
+        // component does not contain the player pointer, so an unbounded
+        // search would scan 0x600 bytes per character per frame forever if
+        // the field ever moved out of range. The budget makes the worst case
+        // a brief hitch instead of a permanent one; the feature then stays
+        // inert, which is the same thing it does when a signature fails.
+        constexpr int kMoveOwnerScanBudget = 4096;
+        std::atomic<uintptr_t> g_moveOwnerOff{0};       // 0 = not yet measured
+        std::atomic<int>       g_moveOwnerTries{0};
+
+        // The offset of `player` within `comp`, or 0 if it is not in there.
+        // Reads are guarded, so a component shorter than the window ends the
+        // search rather than faulting.
+        uintptr_t FindMoveOwnerOffset(uintptr_t comp, uintptr_t player)
+        {
+            for (uintptr_t off = 0; off < kMoveOwnerScanEnd; off += sizeof(uintptr_t))
+            {
+                uintptr_t v = 0;
+                if (!ReadPtr(comp + off, &v))
+                    break;
+                if (v == player)
+                    return off;
+            }
+            return 0;
+        }
 
         // Current real-pad mask for Free Flight (buttons + trigger sentinels),
         // read on the movement thread. XInputGetState on an empty slot is slow,
@@ -1069,9 +1110,29 @@ namespace trinity::game
             if (comp)
             {
                 const uintptr_t player = g_playerMoveOwner.load(std::memory_order_relaxed);
-                uintptr_t owner = 0;
-                if (player && ReadPtr(comp + kOff_MoveComp_MoveOwner, &owner) && owner == player)
-                    isPlayer = true;
+                if (player)
+                {
+                    uintptr_t off = g_moveOwnerOff.load(std::memory_order_relaxed);
+                    if (!off && g_moveOwnerTries.load(std::memory_order_relaxed) >= 0)
+                    {
+                        uintptr_t v = 0;
+                        if (ReadPtr(comp + kMoveOwnerOffGuess, &v) && v == player)
+                            off = kMoveOwnerOffGuess;
+                        else if (g_moveOwnerTries.fetch_add(1, std::memory_order_relaxed)
+                                 < kMoveOwnerScanBudget)
+                            off = FindMoveOwnerOffset(comp, player);
+                        if (off)
+                        {
+                            g_moveOwnerOff.store(off, std::memory_order_relaxed);
+                            LOG("teleport: move-owner cached at component +0x%zX - "
+                                "Free Flight can identify the player.",
+                                static_cast<size_t>(off));
+                        }
+                    }
+                    uintptr_t owner = 0;
+                    if (off && ReadPtr(comp + off, &owner) && owner == player)
+                        isPlayer = true;
+                }
             }
 
             // Are we airborne? The stepper is a shared helper the ground and air
@@ -1135,43 +1196,6 @@ namespace trinity::game
                 g_flightEngaged.store(flyingNow, std::memory_order_relaxed);
 
             oLocoStep(comp, dt, vel, a4, a5, a6, a7);
-        }
-
-        // Capture the map destination the game is about to copy into the marker
-        // manager. r8 holds a pointer to a vec3 {x,y,z}; read it safely because
-        // we are on the game's movement thread and the pointer comes from game
-        // code, but a stale call would crash the whole session.
-        char __fastcall hkDestinationUpdate(uint64_t rcx, uint64_t rdx, uint64_t r8, uint64_t r9)
-        {
-            float x = 0.0f, y = 0.0f, z = 0.0f;
-            float origin[3]{};
-            bool ok = false;
-            __try
-            {
-                const float* p = reinterpret_cast<const float*>(r8);
-                x = p[0];
-                y = p[1];
-                z = p[2];
-                ok = ReadLiveOrigin(origin) &&
-                     std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER) {}
-
-            if (ok)
-            {
-                g_destSequence.fetch_add(1, std::memory_order_acq_rel); // odd: writer owns snapshot
-                g_destX.store(x, std::memory_order_relaxed);
-                g_destY.store(y, std::memory_order_relaxed);
-                g_destZ.store(z, std::memory_order_relaxed);
-                g_destOriginX.store(origin[0], std::memory_order_relaxed);
-                g_destOriginY.store(origin[1], std::memory_order_relaxed);
-                g_destOriginZ.store(origin[2], std::memory_order_relaxed);
-                g_destSequence.fetch_add(1, std::memory_order_release); // even: snapshot complete
-                g_destValid.store(true, std::memory_order_release);
-
-            }
-
-            return oDestinationUpdate(rcx, rdx, r8, r9);
         }
 
         uint64_t __fastcall hkMoveUpdate(uint64_t moveOwner, uint64_t a2, uint64_t a3, uint64_t a4,
@@ -1614,13 +1638,8 @@ namespace trinity::game
                               &hkMoveUpdate, &oMoveUpdate, &g_moveUpdateTarget))
             return false;
 
-        // Capture map-marker / quest-destination updates. Non-fatal: the rest of
-        // teleport works without it; "Teleport to Destination" simply stays grey.
-        if (mem::InstallHook("teleport: destination-update", kSig_DestinationUpdate, "Teleport to Destination disabled",
-                             &hkDestinationUpdate, &oDestinationUpdate, &g_destinationUpdateTarget))
-        {
-            LOG("teleport: destination-update hook installed @ %p.", g_destinationUpdateTarget);
-        }
+        // No hook for the map marker: it is read live off the nav component
+        // when asked. See LoadDestinationSnapshot.
 
         // Resolve the fast-travel trigger + the destination registry global.
         // Non-fatal if missing: position tracking still works, the fast-travel
@@ -1676,11 +1695,10 @@ namespace trinity::game
     void Teleport::Remove()
     {
         mem::RemoveHook(&g_pathingHelperTarget);
-        mem::RemoveHook(&g_destinationUpdateTarget);
+
         mem::RemoveHook(&g_locoStepTarget);
         mem::RemoveHook(&g_moveUpdateTarget);
         g_posValid.store(false, std::memory_order_relaxed);
-        g_destValid.store(false, std::memory_order_relaxed);
         g_markerOriginAddress = 0;
     }
 
@@ -1709,8 +1727,11 @@ namespace trinity::game
         const float worldY = dest.y == 0.0f
             ? LocalToWorld(player.localY, player.originY)
             : dest.y;
-        LOG("teleport: destination world %.2f, %.2f, %.2f",
-            dest.x, worldY, dest.z);
+        // Absolute world coordinates, not engine-local: the request handler
+        // copies them out of the request as-is, and a warp to a far marker
+        // landed on it exactly. Rebasing them through LocalToWorld would
+        // double-count the floating origin.
+        LOG("teleport: marker %.2f, %.2f, %.2f", dest.x, worldY, dest.z);
         return QueueWorldWarp(dest.x, worldY, dest.z, true);
     }
 

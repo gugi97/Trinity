@@ -11,13 +11,34 @@ namespace trinity::game
 {
     namespace
     {
-        // vcomiss xmm2, xmm3 ; seta al ; mov byte ptr [rsi], al
-        // Unique in the image: the comparison, the flag it produces and the
-        // store of that flag are all in the pattern, so it identifies the parry
-        // verdict itself rather than a shape that happens to recur.
-        constexpr const char* kSig_ParryVerdict = "C5 F8 2F D3 0F 97 C0 88 06";
+        //   vsubss  xmm0, xmm2, xmm0        duration = animEnd - animStart
+        //   vmulss  xmm1, xmm0, [k]         duration * k
+        //   vsubss  xmm2, xmm2, xmm1        threshold = animEnd - duration*k
+        //   vcomiss xmm3, xmm2              windowEnd vs threshold
+        //   seta    al                      al = windowEnd > threshold
+        //   mov     [rsi], al
+        //
+        // The verdict alone (`vcomiss/seta/mov`) is already unique, but this
+        // patch overwrites EXECUTABLE code, so the pattern deliberately
+        // includes the threshold arithmetic ahead of it. That arithmetic is
+        // what makes the site a parry verdict rather than some other boolean
+        // that happens to be produced by a seta - and forcing an unrelated
+        // boolean permanently true is a much worse failure than the feature
+        // simply not resolving.
+        //
+        // 2.01.00 rebuilt this: the old pattern read `vcomiss xmm2, xmm3` and
+        // now reads `vcomiss xmm3, xmm2`. The operands are swapped, but the
+        // MEANING is unchanged and still favourable-when-true: the surrounding
+        // code establishes xmm1/xmm3 as the window's start/end and xmm0/xmm2 as
+        // the animation's, and the guard branches above require xmm1 <= xmm3
+        // and xmm0 < xmm2. So `al = 1` still says "the window reaches the good
+        // phase", which is exactly what Easy Parry wants to assert.
+        // Unique match (1) at 0x1407FC514 in 2760.
+        constexpr const char* kSig_ParryVerdict =
+            "C5 EA 5C C0 C5 FA 59 0D ?? ?? ?? ?? C5 EA 5C D1 "
+            "C5 F8 2F DA 0F 97 C0 88 06";
 
-        constexpr uintptr_t kSetaOffset = 4;         // into the match
+        constexpr uintptr_t kSetaOffset = 20;        // into the match
         constexpr uint8_t   kSeta[3] = { 0x0F, 0x97, 0xC0 };  // seta al
         constexpr uint8_t   kForce[3] = { 0xB0, 0x01, 0x90 }; // mov al,1 ; nop
 

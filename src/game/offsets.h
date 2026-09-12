@@ -39,6 +39,13 @@ namespace trinity::game
     // possessor round-trip (see kOff_Owner_Possessor / kOff_Owner_TypeDesc).
     // The enum below is kept only as documentation of the classification.
     inline constexpr uintptr_t kOff_Owner_Actor       = 0x68;
+    // The actor's navigation component, and the map marker the player placed.
+    // Written by the destination request handler 0x142B73330 (which resolves
+    // the component the same way: owner+0x68 then actor+0x168) and zeroed by
+    // that same handler when the marker is cleared, so all-zero means "no
+    // marker" rather than "origin".
+    inline constexpr uintptr_t kOff_Actor_NavComp     = 0x168;
+    inline constexpr uintptr_t kOff_NavComp_Dest      = 0x1E8; // float[3]
     inline constexpr uintptr_t kOff_Actor_StatusMarker = 0x20; // actor -> status marker
     inline constexpr uintptr_t kOff_Owner_ObjectType  = 0x48;  // int32 ObjectType (documentation only)
 
@@ -142,12 +149,33 @@ namespace trinity::game
     // per-frame pin moved to the exact write site, which removes the between-
     // frame race that let fall damage kill.
     //
-    // pa_StatCommit lives in the .link section (not .text); the scanner walks
-    // the whole committed image, so that is fine. Prologue: mov [rsp+10],rbx;
-    // push rbp/rsi/rdi; sub rsp,20; mov rbx,[rcx+18]; movzx ebp,r9w;
-    // add rbx,[rcx+20] (base+norm); ... Unique match.
+    // pa_StatCommit does not live in the main code blob; it sits in the
+    // packer's own region (`.link` in older dumps, `.debug$P` in 2760 - the
+    // packer renames its sections every patch). The scanner walks committed
+    // executable pages rather than named sections, so that is fine, and it is
+    // why nothing here may ever filter by section name.
+    //
+    // 2760 rewrote it. The old pattern keyed on a prologue that computed
+    // base+norm inline (`mov rbx,[rcx+18]; movzx ebp,r9w; add rbx,[rcx+20]`).
+    // That arithmetic now lives in a separate CALCULATOR at 0x14171E4C0 which
+    // only computes and writes through out-pointers, never touching the entry;
+    // pa_StatCommit calls it and remains the sole writer of the entry itself.
+    // Do not hook the calculator by mistake - it is the more obvious match for
+    // the old comment, it has 16 callers, and hooking it would guard nothing,
+    // because the value it returns is still clamped and stored afterwards.
+    //
+    // Prologue in 2760: mov [rsp+20],r9w; mov [rsp+10],rdx; push rbx/rbp/rsi/
+    // rdi/r14; sub rsp,40; lea r14,[rcx+18]; mov rcx,[rcx+20]; add rcx,[r14].
+    // The pattern below stops right after `lea r14,[rcx+18]`: the struct
+    // offset 0x18 is what gives it meaning, and every byte past it is another
+    // instruction-scheduling decision the next patch can reorder. Unique (1).
+    //
+    // The second argument is no longer a time value - it is a pointer the
+    // function stores and later passes on. Trinity forwards all four arguments
+    // untouched and only reads the first, so the hook needs no change; the
+    // int64_t in StatCommit_t is now carrying a pointer, and that is fine.
     inline constexpr const char* kSig_StatCommit =
-        "48 89 5C 24 10 55 56 57 48 83 EC 20 48 8B 59 18 41 0F B7 E9 48 03 59 20 48 89 D6 48 89 CF 4C 39 C3";
+        "66 44 89 4C 24 ?? 48 89 54 24 ?? 53 55 56 57 41 56 48 83 EC ?? 4C 8D 71 18";
 
     // --- Damage multipliers: hook the damage-apply dispatcher ---------------
     // One level above pa_StatCommit sits a per-status "apply signed delta"
@@ -171,10 +199,6 @@ namespace trinity::game
     inline constexpr const char* kSig_DamageApply =
         "48 89 5C 24 ?? 48 89 6C 24 ?? 48 89 74 24 ?? 57 48 83 EC ?? 49 8B C1 49 8B E8 0F B7 DA 48 8B F1 4D 85 C9";
 
-    // Mount stamina update hook (sub_1408BB280). Runs every frame for mounts
-    // and flying creatures, accumulating stamina at [rcx + 0x2c]. Unique match (1).
-    inline constexpr const char* kSig_MountStaminaTick =
-        "48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 55 41 56 41 57 48 8B EC 48 83 EC 70 48 8B F9 C5 F2 58 41 2C";
 
     // marker+0x18 -> the character's vital/target owner: the object battle
     // damage is addressed to (the `targetOwner` argument above). Validation:
@@ -217,29 +241,98 @@ namespace trinity::game
     // wrong realm's manager, which resolves fine and then fails silently. Keep
     // every anchor tied to a specific call site.
     //
-    // In the current dump all four resolve to qword_61830F8 (was qword_6181090
-    // before the update).
+    // 2.01.00 (build 2760) recompiled every one of these call sites and broke
+    // all four at once - not by moving the code, but by rescheduling it. The
+    // best anchor of the old set read:
+    //
+    //     mov rax, cs:G        48 8B 05 <disp>
+    //     mov rcx, [rax]       48 8B 08
+    //     mov r8,  [r8]
+    //     shr r8,  20h
+    //
+    // and in 2760 the SAME call site reads:
+    //
+    //     mov r8,  [r8]        4D 8B 00
+    //     shr r8,  20h         49 C1 E8 20
+    //     lea rdx, [rsp+78h]
+    //     mov rcx, cs:G        48 8B 0D <disp>   <- straight into rcx now
+    //     mov rcx, [rcx]       48 8B 09
+    //     call ...
+    //
+    // The global is loaded through rcx instead of rax, and the operand setup
+    // now precedes the load instead of following it. So the lesson the old
+    // comment drew - key on ABI registers and struct literals, not on the
+    // allocator's register choices - was right but not sufficient: a pattern
+    // that spans several instructions also bets on their ORDER, and that is
+    // the compiler's to change. Hence the anchors below are deliberately
+    // short. Each covers the operand setup plus the load-and-call idiom and
+    // nothing more.
+    //
+    // Consensus still matters, and 2760 proved why. The old fourth anchor
+    // (`mov r8d,[rdi]` + lea + load) survives the patch and now resolves to
+    // 0x146C29C68 - a SIBLING realm's manager, exactly the failure the
+    // CAUTION above warns about. It is dropped rather than kept as a fallback:
+    // an anchor that still matches while pointing somewhere else is worse than
+    // one that fails loudly.
+    //
+    // All four below independently resolve qword_6C29C88 (was qword_61830F8),
+    // and each matches exactly once image-wide. Which of the sibling globals
+    // is the real character manager is not settled statically - it is settled
+    // at runtime by the possessor round-trip in ResolveSelf, which only a
+    // genuine character list can satisfy: a wrong manager yields no character
+    // at all rather than a wrong one.
     struct CharMgrAnchor
     {
         const char* sig;
-        uintptr_t   movOff; // offset of `mov rax,cs:<global>` (7-byte instr) within the match
+        uintptr_t   movOff; // offset of `mov rcx,cs:<global>` (7-byte instr) within the match
     };
 
+    // The SERVER realm's character manager, the sibling of the one above.
+    //
+    // One init function writes both, eight bytes apart: the server manager
+    // into 0x146C29C68 and the client manager into 0x146C29C88. They are the
+    // same class, and the code that uses them is cleanly split - in 2760 the
+    // server global is loaded from 207 sites across 182 functions clustered
+    // in 0x1428A..0x142B6, the client global from 51 sites across 39
+    // functions in 0x1426D..0x142A3. Two disjoint bodies of code, one realm
+    // each.
+    //
+    // This is the anchor that was dropped from kCharMgrAnchors earlier today
+    // for "resolving to a sibling realm's manager". That was the right
+    // observation and the wrong conclusion: it was not a stale anchor
+    // pointing somewhere useless, it was pointing at the realm Trinity had
+    // no other way to reach.
+    //
+    // Why it matters: Trinity used to find the server side by watching the
+    // transaction commit hook fire during a save load. TU 2.01.00's save
+    // loader does not go through that pipeline, so the hook never fired, no
+    // candidate was ever captured, and everything gated on the server realm
+    // (Add Item, Edit Item, durable dye) stayed locked for the whole
+    // session. Walking this global needs no hook and no user action.
+    //
+    // Verified: exactly one match in 2760, at 0x1428A1C71, resolving
+    // 0x146C29C68.
+    inline constexpr const char* kSig_CharMgrServer =
+        "4D 8B 24 24 48 8D 55 C0 48 8B 0D ?? ?? ?? ?? 48 8B 09 E8";
+    inline constexpr uintptr_t kOff_CharMgrServer_Mov = 0x08; // mov rcx,cs:<global>
+
     inline constexpr CharMgrAnchor kCharMgrAnchors[] = {
-        // sub_22E6330: mov rax,cs:G / mov rcx,[rax] / mov r8,[r8] / shr r8,20h.
-        // Best of the set - pure ABI arg setup plus a literal shift count.
-        {"48 8B 05 ?? ?? ?? ?? 48 8B 08 4D 8B 00 49 C1 E8 20", 0},
-        // sub_251E3B0: mov r8d,[rdx+90h] / lea rdx,[rsp+..] / mov rcx,[rax] / call.
+        // mov r8,[r8] / shr r8,20h / lea rdx,[rsp+..] / mov rcx,cs:G / mov rcx,[rcx] / call.
+        // Best of the set: `shr r8,20h` on an ABI argument is a literal shift
+        // count on a fixed register, nothing the allocator can rename. The
+        // first three instructions alone are already unique image-wide.
+        {"4D 8B 00 49 C1 E8 20 48 8D 54 24 ?? 48 8B 0D ?? ?? ?? ?? 48 8B 09 E8", 12},
+        // mov r8d,[rdx+90h] / lea rdx,[rsp+..] / mov rcx,cs:G / mov rcx,[rcx] / call.
         // rdx is the incoming arg2 at entry; 0x90 is a struct offset.
-        {"48 8B 05 ?? ?? ?? ?? 44 8B 82 90 00 00 00 48 8D 54 24 ?? 48 8B 08 E8", 0},
-        // sub_251D530: mov r8d,[rcx+160h] / lea rdx,[rbp+..] / mov rcx,[rax] / call.
-        // rcx is the incoming arg1 at entry; 0x160 is a struct offset.
-        {"48 8B 05 ?? ?? ?? ?? 44 8B 81 60 01 00 00 48 8D 55 ?? 48 8B 08 E8", 0},
-        // sub_2514EB0 / sub_22EBC00: mov r8d,[rdi] / lea rdx,[rsp+..] / mov rcx,[rax] / call.
-        // Weakest of the set (rdi is allocator-chosen) and it matches BOTH of
-        // those sites - but both resolve to the same global, so it still votes
-        // correctly. Kept as a fallback.
-        {"48 8B 05 ?? ?? ?? ?? 44 8B 07 48 8D 54 24 ?? 48 8B 08 E8", 0},
+        {"44 8B 82 90 00 00 00 48 8D 54 24 ?? 48 8B 0D ?? ?? ?? ?? 48 8B 09 E8", 12},
+        // mov r8d,[rdi] / cmp r8d,[r13+60h] / je / lea rdx,[rsp+..] / mov rcx,cs:G / ...
+        // The registers are the allocator's, but 0x60 is a struct offset and
+        // the compare-then-branch shape pins the site.
+        {"44 8B 07 45 3B 45 60 0F 84 ?? ?? ?? ?? 48 8D 54 24 ?? 48 8B 0D ?? ?? ?? ?? 48 8B 09 E8", 18},
+        // mov r8d,[r13] / lea rdx,[rbp+130h] / mov rcx,cs:G / mov rcx,[rcx] / call.
+        // Weakest of the set - both the register and the frame offset are the
+        // allocator's choice - but it is a fourth independent vote.
+        {"45 8B 45 00 48 8D 95 30 01 00 00 48 8B 0D ?? ?? ?? ?? 48 8B 09 E8", 11},
     };
 
     // Character manager -> the vector of all gameplay characters. It is the
@@ -386,8 +479,8 @@ namespace trinity::game
     // (lea rbp,[rax-798h]; sub rsp,860h). The frame displacements are what
     // make it unique - 6 same-shaped functions match if they are wildcarded.
     inline constexpr const char* kSig_LocoStepper =
-        "48 8B C4 48 89 58 10 44 88 48 20 55 56 57 41 54 41 55 41 56 41 57 "
-        "48 8D A8 68 F8 FF FF 48 81 EC 60 08 00 00";
+        "48 8B C4 48 89 58 10 44 88 48 20 48 89 48 08 55 56 57 41 54 "
+        "41 55 41 56 41 57 48 8D A8 78 F8 FF FF";
     // The AIRBORNE mover - the caller Free Flight identifies by return
     // address. The loco stepper above is a shared helper: the ground mover and
     // the air mover both call it, and nothing on the component separates a
@@ -428,22 +521,24 @@ namespace trinity::game
     // before travelling, which is exactly the documented contract. The frame
     // immediates are wildcarded; the arg shuffle and the sceneId test are not.
     inline constexpr const char* kSig_TravelToNode =
-        "48 89 5C 24 18 89 54 24 10 48 89 4C 24 08 55 56 57 48 8D 6C 24 ?? "
-        "48 81 EC ?? ?? ?? ?? 41 8B F8 33 DB 83 FA FF";
+        "48 89 5C 24 ?? 48 89 74 24 ?? 89 54 24 ?? 48 89 4C 24 ?? 55 "
+        "57 41 56 48 8D 6C 24 ??";
 
     // --- Destination map marker update ---------------------------------------
-    inline constexpr const char* kSig_DestinationUpdate =
-        "48 8B C4 48 89 58 10 48 89 48 08 55 56 57 41 54 41 55 41 56 41 57 "
-        "48 8D 68 ?? 48 81 EC ?? ?? ?? ?? C5 F8 29 70 ?? 49 8B F8";
+    // kSig_DestinationUpdate is GONE, deliberately. In 2760 it matched
+    // 0x140675FE0, which is the road/spawn streamer's terrain ground-clamp:
+    // its third argument is the centre of the sector grid being streamed
+    // around the player, not a destination. Trinity captured that and warped
+    // the player to their own position. The marker is now read straight off
+    // the nav component - see kOff_NavComp_Dest - which needs no hook at all.
 
     // --- Pathing helper ------------------------------------------------------
     // When the movement system is following a map/quest destination, a pathing
     // routine recomputes the desired movement vector every frame and writes it
     // to moveOwner+0x1B0.
     inline constexpr const char* kSig_PathingHelper =
-        "48 89 5C 24 08 48 89 74 24 18 55 57 41 56 48 8D 6C 24 ?? "
-        "48 81 EC ?? ?? ?? ?? 4D 8B F0 48 8B F2 66 C7 45 ?? 04 00 "
-        "C6 45 ?? 01 33 DB 48 89 5D ?? 48 89 5D ?? C5 FB 10 05";
+        "48 8B C4 48 89 58 08 48 89 70 18 55 57 41 56 48 8D 68 B1 48 "
+        "81 EC ?? ?? ?? ??";
 
     // Marker origin prefix for coordinate rebasing
     inline constexpr const char* kSig_MarkerOriginPrefix  = "C5 F8 5C 05";
@@ -569,7 +664,8 @@ namespace trinity::game
     // it. Money is the exception: its inventory slot is a passive mirror, so
     // editing it does not change spendable currency.)
     inline constexpr const char* kSig_InvGetItemQty =
-        "48 89 5C 24 ? 48 89 6C 24 ? 48 89 74 24 ? 57 48 83 EC 20 49 8B E8 0F B7 DA";
+        "48 89 5C 24 ?? 66 89 54 24 ?? 55 56 57 48 83 EC 30 48 8B F1 "
+        "33 FF 48 8D 4C 24 ??";
     inline constexpr const char* kSig_InvGetHolder =
         "40 53 48 83 EC 20 48 8B 41 ? 48 8B D9 48 8B 48";
 
@@ -605,7 +701,8 @@ namespace trinity::game
     // cap. Substituting the count inside the hook makes the engine's own
     // re-stamps apply the override, which closes the window for good.
     inline constexpr const char* kSig_InvSetExpandSlots =
-        "48 89 5C 24 ? 56 48 83 EC 20 48 8B 41 ? 48 8B F2 8B 49";
+        "48 89 6C 24 ?? 48 89 74 24 ?? 48 89 7C 24 ?? 41 56 48 83 EC "
+        "20 48 8B 41 18 41 0F B7 E9";
 
     // The FREE-SPACE GATE (IDB sub_1CE8F40) - the check that actually throws
     // "inventory full" on a world pickup, BEFORE the insert planner runs:
@@ -637,8 +734,9 @@ namespace trinity::game
     // holders makes the edit real, usable, and non-reverting (live-proven).
     // Unique byte signature.
     inline constexpr const char* kSig_InvHolderInsert =
-        "48 89 5C 24 ? 4C 89 44 24 ? 48 89 54 24 ? 48 89 4C 24 ? 55 56 57 41 54 "
-        "41 55 41 56 41 57 48 8D AC 24 ? ? ? ? 48 81 EC 10 03 00 00";
+        "48 89 5C 24 ?? 4C 89 44 24 ?? 48 89 54 24 ?? 48 89 4C 24 ?? "
+        "55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? 48 "
+        "81 EC ?? ?? ?? ?? 49 8B D8";
 
     // Inventory transaction COMMIT (IDB sub_1CE1E70), called by the transaction
     // orchestrator sub_1CC15C0 as `commit(holder, &err, CONTAINER, ...)` - its
@@ -670,8 +768,9 @@ namespace trinity::game
     // reachable points at that arena. Capture-at-load is the route; this is it.
     // Unique byte signature.
     inline constexpr const char* kSig_InvCommit =
-        "4C 89 44 24 ? 48 89 54 24 ? 48 89 4C 24 ? 55 53 56 57 41 54 41 55 41 56 "
-        "41 57 48 8D 6C 24 ? 48 81 EC 48 01 00 00 4D 8B D0 48 8B D1";
+        "48 89 5C 24 ?? 4C 89 44 24 ?? 48 89 54 24 ?? 48 89 4C 24 ?? "
+        "55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 ?? 48 81 EC ?? "
+        "?? ?? ?? 4D 8B F9 4D 8B E0";
 
     // Fallback container resolution (the hook above only captures the
     // container when the game happens to query an item count, which is NOT
@@ -690,9 +789,9 @@ namespace trinity::game
     // - the exact chain we walk. Unique match; the mov's RIP operand is at
     // match+0x15 (7-byte instruction).
     inline constexpr const char* kSig_InvCoreGlobal =
-        "48 89 54 24 ? 53 48 83 EC 30 48 8B DA C7 44 24 20 00 00 00 00 "
-        "48 8B 05 ? ? ? ? 48 8B 50 30 48 8B 52 50 48 8B CB E8";
-    inline constexpr uintptr_t kOff_InvCoreGlobal_Mov = 0x15; // mov rax, cs:<global>
+        "48 8B 0E 48 8B 49 08 E8 ?? ?? ?? ?? 84 C0 0F 85 ?? ?? ?? ?? "
+        "48 8B 05 ?? ?? ?? ?? 48 8B 48 30 48 8B 59 50";
+    inline constexpr uintptr_t kOff_InvCoreGlobal_Mov = 0x14; // mov rcx, cs:<global>
     inline constexpr uintptr_t kOff_Global_Mid        = 0x30; // global+0x30 -> mid
     inline constexpr uintptr_t kOff_Mid_Container     = 0x50; // mid+0x50 -> container
     inline constexpr uintptr_t kOff_Container_Sub     = 0x68; // container+0x68 -> sub-object
@@ -873,18 +972,60 @@ namespace trinity::game
     //     mov qword ptr [rcx+0x10], r8   ; quantity (arg3, i64)
     // Unique.
     inline constexpr const char* kSig_TrItemValueCtor =
-        "48 89 5C 24 ? 48 89 4C 24 ? 55 56 57 41 54 41 55 41 56 41 57 48 8B EC "
-        "48 83 EC 60 4C 8B EA 48 8B F1 48 C7 01 FF FF FF FF 0F B7 02 66 89 41 08 "
-        "4C 89 41 10";
-    // Per-placement COMMIT (IDB sub_1CE1020):
-    //     void* f(holder, int* outErr, void* unused, void* placement, u16 slotIdx)
-    // Re-finds the bucket from the item's own def (+66) and calls sub_ED65670,
+        "48 89 5C 24 ?? 48 89 4C 24 ?? 55 56 57 41 54 41 55 41 56 41 "
+        "57 48 8B EC 48 83 EC 70 4C 8B F2 4C 8B E1";
+    // NOTE on destination storage. The holder also carries a live item->storage
+    // map (0x1420825C0, a jmp thunk into 0x14E0E30C0), and the per-placement
+    // insert at 0x142077410 consults it before falling back to the definition's
+    // default. It is tempting to match that here - but the engine's own add
+    // path does NOT: at 0x142A6FD3B it takes the default from itemInfo+0x428
+    // and plans against that bucket, leaving the insert free to re-derive.
+    // Planning against the map instead makes Trinity disagree with the
+    // engine's planner rather than agree with its insert. Use the default.
+
+    // Publish that the holder changed (0x142A93B00 in 2760):
+    //     void f(void* holder)
+    // Appends to the revision vector at holder+0xF8, rolls the sync hash and
+    // clears the local-modification flag at holder+0x100. The engine calls it
+    // after every add (0x142A6FF8E) and it is how subsystems caching a view of
+    // the container - the equipment component's ammo watcher included - learn
+    // to look again.
+    //
+    // Safe to call blind: it compares holder+0x100 against holder+0x108 on
+    // entry and takes a different path when they disagree, so it will not
+    // append a revision the holder is not ready for. Unique.
+    inline constexpr const char* kSig_InvBumpRevision =
+        "40 57 48 83 EC 20 8B 81 08 01 00 00 48 8B F9 39 81 00 01 00 "
+        "00 0F 85";
+
+    // Per-placement COMMIT (0x142077410 in 2760):
+    //     int* f(void* holder, int* outErr, void* placement, u16 slotIdx)
+    // Re-finds the bucket from the item's own definition and calls the inserter,
     // which validates the item may live in that storage, copies it into an empty
     // slot (or merges onto an existing stack) and maintains the used-slot count.
-    // 3rd arg is a genuine don't-care: it only supplies the high bits of a
-    // scratch whose low word is immediately overwritten with the typeId.
+    //
+    // This is the function the engine's OWN plan-then-commit loop uses. At
+    // 0x142A6FE30, straight after the same planner Trinity calls with the same
+    // arguments, it walks the placement vector by 0xE0 and does exactly:
+    //     movzx r9d, word ptr [rdi+0xD8]   ; the slot the planner chose
+    //     mov   r8, rdi                    ; the placement itself
+    //     lea   rdx, [rbp+0xC]             ; error out
+    //     mov   rcx, r14                   ; the holder
+    //     call  0x142077410
+    // - which also confirms kOff_Placement_SlotIdx independently.
+    //
+    // Do NOT confuse this with 0x14207A2C0, which the 2760 re-derivation
+    // briefly bound this name to. That one takes eight arguments and means
+    // something else: all three of its callers fetch the placement out of a
+    // LIVE slot first (via 0x142078A70), so it commits a CHANGE to a slot that
+    // is already populated. A slot the planner has merely reserved is not, and
+    // it refused every add for that reason. The giveaway was that the refusal
+    // was byte-identical for every item and both realms - a wrong argument
+    // varies with the item, a wrong function does not.
+    // Unique.
     inline constexpr const char* kSig_InvCommitPlacement =
-        "48 89 5C 24 ? 4C 89 44 24 ? 55 56 57 48 83 EC 30 41 0F B7 59";
+        "48 89 5C 24 ?? 48 89 6C 24 ?? 56 57 41 56 48 83 EC 30 41 0F "
+        "B7 58 08 48 8B F1";
     // Free the planner's placement vector (IDB sub_7D13B10, reached via the
     // 5-byte jmp thunk sub_332C40 - thunks cannot be signatured, so this is the
     // target; calling it is identical). Its `imul rcx, rax, 0E0h` in the
@@ -894,9 +1035,17 @@ namespace trinity::game
     // Entering at the `sub` (as this signature used to) makes that `pop` eat
     // the return address and `ret` jump to a stack value - which is exactly
     // the "faulting module: unknown" access violation Add Item was dying on.
+    // Extended through the `imul rcx, rax, 0E0h` itself. The shorter prefix was
+    // unique in 2760 and matched TWICE in 2850: the second hit, 0x148F67630, is
+    // DestroyEquippedItemBehavior's vector free, byte-identical up to the stride
+    // immediate and then 0xF0 where this one is 0xE0. The stride self-check
+    // below does catch it - 240 != 224 disables Add Item rather than corrupting
+    // anything - but a signature that needs a later guard to notice it matched
+    // the wrong function is already wrong. Carrying the stride inside the
+    // pattern makes the two impossible to confuse. Verified: one match in 2850.
     inline constexpr const char* kSig_InvFreePlacements =
-        "48 89 5C 24 ? 57 48 83 EC 20 48 8B D9 48 8B 09 48 85 C9 74 ?? 33 FF "
-        "39 7B ?? 76 ?? 0F 1F 40 ?? 8B C7 48 69 C8 E0 00 00 00";
+        "48 89 5C 24 ?? 57 48 83 EC 20 48 89 CB 48 83 39 00 74 57 31 "
+        "FF 39 79 08 76 ?? 66 0F 1F 44 00 00 89 F8 48 69 C8 E0 00 00 00";
     // Byte offset of that `imul` immediate inside the match. We re-read it at
     // load and refuse Add Item unless it agrees with kPlacement_Stride - the
     // stride moving under us is precisely how a placement loop would start
@@ -968,7 +1117,7 @@ namespace trinity::game
     // was tried and fails (bogus TEB, then an access violation on the second
     // call, almost certainly CFG rejecting an indirect call into our own page).
     inline constexpr uintptr_t kOff_Teb_TlsPointer = 0x58; // TEB.ThreadLocalStoragePointer
-    inline constexpr uintptr_t kTls_RealmFlag      = 498;  // u8: 0 = client, 1 = server
+    inline constexpr uintptr_t kTls_RealmFlag      = 509;  // u8: 0 = client, 1 = server (was 498 before 2.01.00)
 
     // Item-info table (typeId -> item definition -> item key string, for names).
     // Its resolver is one of ~121 identical 16-bit-key table-resolver clones, so
@@ -1160,7 +1309,44 @@ namespace trinity::game
     // Setting it to 0 removes the crime type, so there is nothing to register
     // rather than something registered as worthless.
     inline constexpr const char* kStr_TribeInfoTable = "tribeinfo";
-    inline constexpr uintptr_t kOff_TribeDef_WantedCrimeType = 0x50; // u8
+    inline constexpr uintptr_t kOff_TribeDef_WantedCrimeType = 0x50;
+    // The value that means "this tribe reports nothing". It is 7, not 0.
+    //
+    // Zero is an ordinary member of the enum, and writing it was writing a
+    // crime type rather than clearing one - the consumer at 0x14251D12A tests
+    // for 7 first and branches straight out, then compares the remaining
+    // values individually (`cmp cl, 5; sete al`). So the tribe half of No
+    // Bounty never worked; on 2760 it merely looked busy, because the data
+    // happened to be non-zero and Trinity changed 372 rows to a different
+    // crime. On 2850 the rows already read 0, so it changed nothing and
+    // finally said so.
+    inline constexpr uint8_t   kTribeCrime_None              = 7; // u8
+
+    // The gate every crime passes through, and the right place to stop one.
+    //
+    //   bool f(void* actor, void* target, void* entity, const void* tag,
+    //          uint8_t category)     // category is the 5th arg, at [rbp+0x50]
+    //
+    // Editing WantedInfo and TribeInfo - what No Bounty did until now - only
+    // ever zeroed the PRICE a crime costs. It could not stop the crime from
+    // happening, and for theft it could not even reach: at 0x14251D107 the
+    // function does `cmp dil, 7; jae`, so category 7 (take-or-steal ownership)
+    // jumps clean over the TribeInfo lookup at 0x14251D125 the table edit was
+    // aiming at. Guards still turned hostile and NPCs still fled; only the
+    // bounty number stayed at zero.
+    //
+    // Returning false here refuses the crime outright - theft, assault and
+    // trespass alike - and mutates no shared definition data, so it toggles
+    // instantly and leaves nothing to roll back.
+    //
+    // Frame size wildcarded deliberately: the literal `48 81 EC 80 00 00 00`
+    // is also unique today, but a stack frame is the compiler's to resize and
+    // 2.01.00 broke thirty signatures doing exactly that. Verified: one match
+    // either way, at 0x14251CFF0.
+    inline constexpr const char* kSig_CrimeGate =
+        "48 89 5C 24 ?? 48 89 74 24 ?? 48 89 7C 24 ?? 55 41 54 41 55 "
+        "41 56 41 57 48 8B EC 48 81 EC ?? ?? ?? ?? 49 8B F0 4C 8B F2 "
+        "4C 8B E9 0F B6 7D 50 40 88 7C 24 ??";
     inline constexpr uint32_t  kTribeRows_Max = 8192;
     inline constexpr uintptr_t kOff_StrDef_Buffer  = 0x18; // ptr -> string obj
     inline constexpr uintptr_t kOff_ItemDef_Icons  = 0x90; // _itemIconList (vector)
@@ -1229,43 +1415,71 @@ namespace trinity::game
     inline constexpr uintptr_t kOff_LocGet_SizeDisp  = 0x0C; // cmp eax,[rcx+XX]
     inline constexpr uintptr_t kOff_LocGet_DataDisp  = 0x1A; // add rax,[rcx+XX]
     inline constexpr uintptr_t kOff_LocProv_Offset   = 0x18; // fallback
-    inline constexpr uintptr_t kOff_LocMgr_Size      = 0x68; // fallback
-    inline constexpr uintptr_t kOff_LocMgr_Data      = 0x60; // fallback
-    // The stealth crime report function:
-    inline constexpr const char* kSig_ReportStealthExecute =
-        "48 89 5C 24 08 57 48 83 EC 40 48 8B DA 49 8B 78 70 44 0F B6 41 08 "
-        "48 8D 54 24 20 48 8B 0F E8 ?? ?? ?? ?? 90 80 7C 24 30 00 75 08 "
-        "C7 03 00 00 00 00 EB 22 48 8B 07 48 8B 40 08 48 8B 40 68 48 8B 54 24 28 "
-        "48 8B 88 B0 00 00 00";
-    // The theft crime & witness broadcast function (ClientStealItemInteractionProcessor -> sub_141F7A6B0):
-    inline constexpr const char* kSig_TheftCrimeReport =
-        "4C 89 4C 24 20 4C 89 44 24 18 48 89 54 24 10 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 A8 E7 FF FF";
-    // ClientStealItemInteractionProcessor::execute (vtable[2]) - top-level steal crime processor:
-    inline constexpr const char* kSig_ClientStealItemExecute =
-        "4C 8B DC 49 89 5B 08 49 89 6B 10 49 89 73 18 57 48 81 EC 90 00 00 00 49";
-    // ClientStealItemInteractionProcessor step/process (sub_141DF27A0):
-    inline constexpr const char* kSig_ClientStealItemProcess =
-        "48 89 5C 24 08 48 89 6C 24 18 48 89 74 24 20 57 41 54 41 55 41 56 41 57 48 81 EC 30 01 00 00";
-    // AIFunction_RegistCrime::execute (sub_141F9E370) - core AI crime registrar:
-    inline constexpr const char* kSig_AIFuncRegistCrime =
-        "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B 02 48 8B F9 48 8B CA 48 8B DA FF 50 08 4C 8B 07 48 8B CF 0F B7 F0 41 FF 50 08 66 3B C6 77 28 73 12 B0 FF";
-    // AIFunction_WitnessCriminalPlayer::execute (sub_141F98BF0) - core AI witness registrar:
-    inline constexpr const char* kSig_AIFuncWitnessCriminal =
-        "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B 02 48 8B F9 48 8B CA 48 8B DA FF 50 08 4C 8B 07 48 8B CF 0F B7 F0 41 FF 50 08 66 3B C6 77 1D 73 12 B0 FF";
-    // TrocTrWantedAddCrimeRecordReq handler (sub_1425E6D20) - core crime record recorder (pickpocket, assault, steal):
-    inline constexpr const char* kSig_WantedAddCrimeRecord =
-        "48 89 5C 24 08 55 56 57 41 54 41 55 41 56 41 57 48 8B EC 48 81 EC 80 00 00 00 49 8B F0 48 8B DA 4C 8B F1 4D 8B 78 18";
-    // TrocTrSetCrimeTargetReq handler (sub_1425E73A0) - marks player as crime target:
-    inline constexpr const char* kSig_SetCrimeTarget =
-        "48 89 5C 24 08 48 89 74 24 10 55 57 41 54 41 56 41 57 48 8B EC 48 83 EC 60 49";
+    // Fallbacks only: Install() reads the live values straight out of the
+    // getter's own instructions (kOff_LocGet_SizeDisp / _DataDisp) and
+    // overwrites these. They had been stale since before TU 2.02.00 without
+    // anyone noticing, precisely because the self-resolve always won - the
+    // 2.01.00 logs already printed "size +0x60, data +0x58" against constants
+    // reading 0x68/0x60. Corrected against 0x14123262A `cmp eax, [rcx+0x60]`
+    // and 0x141232637 `add rax, [rcx+0x58]`, so the fallback is now worth
+    // falling back to.
+    inline constexpr uintptr_t kOff_LocMgr_Size      = 0x60; // fallback
+    inline constexpr uintptr_t kOff_LocMgr_Data      = 0x58; // fallback
+    // --- Crime / stealth: research only, no signatures kept ------------------
+    // Eight signatures used to live here, covering the theft-and-witness path.
+    // Nothing ever called them: No Bounty is implemented by zeroing the
+    // WantedInfo data table (Inventory::SetNoBounty), not by hooking any of
+    // this. They were removed in the 2.01.00 re-derivation, for a reason worth
+    // recording: an unused signature is not free. Every patch "breaks" it, it
+    // is counted as damage, and someone then spends an afternoon re-deriving a
+    // function that no code will ever call. Eight of the thirty signatures
+    // 2.01.00 broke were these.
+    //
+    // The route back, if a crime feature is ever built, is the part worth
+    // keeping. All of it was found from the class names, which the engine
+    // stores as plain strings and which survive recompiles far better than any
+    // byte pattern:
+    //
+    //   ClientStealItemInteractionProcessor  execute() is vtable[2]; a
+    //       separate step/process function drives it
+    //   AIFunction_RegistCrime               execute() - the AI-side registrar
+    //   AIFunction_WitnessCriminalPlayer     execute() - near-identical to the
+    //       registrar; in 2658 the two differed by a single jump displacement,
+    //       so any pattern must be checked against BOTH before it is trusted
+    //   TrocTrWantedAddCrimeRecordReq        records pickpocket/assault/steal
+    //   TrocTrSetCrimeTargetReq              marks the player as a crime target
+    //
+    // A stealth-report function and a theft/witness broadcast sit on the same
+    // path. The wanted-level data table above (kStr_WantedInfoTable and the
+    // WantedDef offsets) is still live and still used - it is what No Bounty
+    // actually writes.
     inline constexpr uintptr_t kOff_WantedDef_UseTargetPrice = 0x20;
 
     // --- World: Master Frame Update (Game Speed / Timescale) -----------------
-    // sub_140947B60: the engine's root frame updater. Passes context containing
-    // TimeManager (+0x60). Setting TimeManager.mode (+0x50) = 1 and TimeManager.timeScale
-    // (+0x54) = mult directly drives all animations, physics, AI, and combat simulation.
+    // The engine's root frame updater. Its context carries the TimeManager at
+    // +0x60; setting TimeManager.mode (+0x50) = 1 and TimeManager.timeScale
+    // (+0x54) = mult drives all animation, physics, AI and combat simulation.
+    // Confirmed in 2760 at 0x140A541C0: the engine's own consumer a few
+    // hundred bytes in reads exactly those fields - `movzx ecx,[rax+0x50];
+    // cmp cl,1; vmovss xmm1,[rax+0x54]` - and scales [rax+0x64] by it.
+    //
+    // This is matched INSIDE the function, not at its prologue, and installed
+    // with InstallHookInterior. 2.01.00 is why: the function did not move or
+    // change behaviour, but its register saves and stack frame were
+    // recompiled (rsi pushed rather than stored, r12 added, 0x1D0 -> 0x1B0),
+    // and that alone killed the old prologue pattern and Game Speed with it.
+    // The prologue is still not unique in 2760 - five functions share its
+    // shape - whereas the four instructions below are unique image-wide:
+    //
+    //     mov rdi, rcx            the incoming context
+    //     mov rdx, [rcx+0x60]     -> TimeManager
+    //     mov eax, [rdx+0x64]
+    //     mov [rdx+0x60], eax     carry last frame's value forward
+    //
+    // Every constant in it is a struct offset, which is fixed by the data
+    // layout rather than by the compiler. Unique match (1) at 0x140A54203.
     inline constexpr const char* kSig_MasterFrameUpdate =
-        "48 8B C4 48 89 58 10 48 89 68 18 48 89 70 20 57 41 56 41 57 48 81 EC D0 01 00 00 C5 F8 29 70 D8";
+        "48 8B F9 48 8B 51 60 8B 42 64 89 42 60";
 
     // --- World: Game Speed (fixed-timestep override) ------------------------
     // The engine's per-frame timing update (IDB sub_8FBD80) measures the real
@@ -1313,13 +1527,24 @@ namespace trinity::game
     // in-game clock exactly):
     //   +0x00 i32 day    +0x04 i32 hour    +0x08 i32 minute    +0x0C i32 second
     //
-    // Located by a unique signature over sub_1CA3890's realm-select read: the
-    // TLS realm probe `mov edx, 1F2h` (498 = the client/server selector byte)
-    // followed by the two `vmovups ymm0, cs:<global>` (server if TLS[498], else
-    // client). The two RIP operands resolve to the server and client globals.
+    // Located by a unique signature over the realm-select read: a TLS realm
+    // probe followed by the two `vmovups ymm0, cs:<global>` (server if the
+    // probed byte is set, else client). The two RIP operands resolve to the
+    // server and client globals.
+    //
+    // The TLS index here is NOT kTls_RealmFlag. There are two selector bytes
+    // and 2.01.00 moved both: the general one 498 -> 509 (used by ~11,400
+    // sites), and this clock-specific one 502 -> 492 (used by ~150). They are
+    // genuinely different slots, so do not reconcile them - the constant is
+    // baked into the pattern below and must stay exact.
+    //
+    // Verified in 2760: unique at 0x14202EF24, resolving the server clock to
+    // 0x146931D68 and the client clock to 0x146931D48 - 0x20 apart, both in a
+    // data section, which is the shape a pair of 32-byte clock structs should
+    // have. The relative layout inside the match is unchanged.
     inline constexpr const char* kSig_FieldTimeRealm =
-        "BA F6 01 00 00 48 8B 08 0F B6 04 0A 84 C0 74 0A "
-        "C5 FC 10 05 ?? ?? ?? ?? EB 08 C5 FC 10 05 ?? ?? ?? ??";
+        "BA EC 01 00 00 48 8B 08 0F B6 04 0A 84 C0 74 0A C5 FC 10 05 "
+        "?? ?? ?? ?? EB 08 C5 FC 10 05 ?? ?? ?? ??";
     // Within the match: server `vmovups` at +0x10, client `vmovups` at +0x1A;
     // each is 8 bytes (4-byte opcode C5 FC 10 05 + 4-byte disp at its tail).
     inline constexpr uintptr_t kOff_FieldTime_ServerVmovups = 0x10;
@@ -1351,8 +1576,8 @@ namespace trinity::game
     // distinctive accumulator add `vaddss xmm0, xmm1, [rcx+2Ch]`
     // (make_signature_for_function, unique in this build).
     inline constexpr const char* kSig_FieldTimeTick =
-        "48 89 5C 24 ?? 48 89 74 24 ?? 48 89 7C 24 ?? 55 41 56 41 57 48 8B EC "
-        "48 83 EC 70 48 8B F9 C5 F2 58 41 2C";
+        "48 89 5C 24 ?? 48 89 74 24 ?? 48 89 7C 24 ?? 4C 89 64 24 ?? "
+        "55 41 56 41 57 48 8B EC 48 83 EC 70 48 8B F9 C5 F2 58 41 2C";
 
     // --- Time of Day: FREEZE the visible SUN via the RENDER manager ----------
     // The numeric field clock above is only half the story. The visible
@@ -1493,9 +1718,9 @@ namespace trinity::game
     // prologue through the arg shuffle (mov r15,r8; mov r12,rdx; mov r14,rcx;
     // mov r13,[rcx+8]); stack/frame immediates wildcarded. Unique.
     inline constexpr const char* kSig_EquipBatch =
-        "48 89 5C 24 10 55 56 57 41 54 41 55 41 56 41 57 "
-        "48 8D AC 24 ?? ?? ?? ?? B8 ?? ?? ?? ?? "
-        "E8 ?? ?? ?? ?? 48 2B E0 4D 8B E0 4C 8B EA 4C 8B F1 4C 8B 79 08";
+        "48 89 5C 24 ?? 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 "
+        "?? ?? ?? ?? B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 2B E0 4D 8B F8 "
+        "4C 8B E2 48 8B F1 4C 8B 71 08";
 
     // The client dye-ack applier (IDB sub_7D9C50):
     //     int* f(void* equipComponent, int* outErr, void* batch1960)
@@ -1514,8 +1739,8 @@ namespace trinity::game
     // from BatchEquip here, against +0x10380 in the analysed build, and it
     // walks the same equip table. Unique.
     inline constexpr const char* kSig_DyeApplyBatch =
-        "48 89 5C 24 ? 48 89 54 24 ? 55 56 57 41 54 41 55 41 56 41 57 "
-        "48 83 EC ?? 4D 8B E0 48 8B F2 4C 8B F1";
+        "4C 89 44 24 ?? 48 89 54 24 ?? 55 53 56 57 41 54 41 55 41 56 "
+        "41 57 48 8B EC 48 83 EC 68 49 8B F0";
 
     // The dye-record upsert primitive (IDB sub_1F8CB40):
     //     void f(void* itemVal, const uint8_t record[16])
@@ -1523,15 +1748,35 @@ namespace trinity::game
     // (growing the vector in the CALLING THREAD'S REALM) while count < 12.
     // Used for the inventory-instance mirror. The `49 C1 E0 04` is the
     // 16-byte record stride (shl r8,4) - semantic, keep literal.
+    // Re-anchored for 2850 on the function's OWN body rather than a prologue.
+    // The previous pattern matched 0x142355580 - a four-argument diff batcher
+    // that walks the same vector read-only and returns without touching it, so
+    // Trinity called it, got no fault, and reported twelve channels "newly
+    // created" while the count at +0x80 stayed zero. The save then wrote what
+    // was there: nothing. That is worth stating plainly, because the header
+    // comment above had the arity right all along and the prototype in dye.cpp
+    // drifted away from it.
+    //
+    // This pattern is the upsert's first six instructions, and every one of
+    // them is load-bearing rather than incidental:
+    //     48 8B 41 78     mov  rax, [rcx+0x78]   ; kOff_ItemVal_DyeData
+    //     4C 8D 49 78     lea  r9,  [rcx+0x78]
+    //     45 8B 51 08     mov  r10d,[r9+8]       ; count, i.e. itemVal+0x80
+    //     41 8B CA        mov  ecx, r10d
+    //     48 C1 E1 04     shl  rcx, 4            ; the 16-byte record stride
+    //     48 03 C8        add  rcx, rax
+    //     48 3B C1        cmp  rax, rcx
+    // Unique in 2850, at 0x142355870.
     inline constexpr const char* kSig_DyeUpsert =
-        "48 8B 41 ? 4C 8B D1 44 8B 41 ? 49 C1 E0 04";
+        "48 8B 41 78 4C 8D 49 78 45 8B 51 08 41 8B CA 48 C1 E1 04 48 "
+        "03 C8 48 3B C1";
 
     // Equip component layout (verified in THIS build from BatchEquip's own
     // table walk: `a1[17]` -> desc, `*(desc+8) + 200*i`, tag at +192).
     // 1.17.00 moved the descriptor DOWN one qword, 0x88 -> 0x80. BatchEquip
     // reads it twice and never touches +0x88 any more. Note the direction: this
     // is the one field in this build that moved down rather than up.
-    inline constexpr uintptr_t kOff_EquipComp_Table  = 0x80; // -> table descriptor
+    inline constexpr uintptr_t kOff_EquipComp_Table  = 0x90; // -> table descriptor (was 0x80 before 2.01.00)
     inline constexpr uintptr_t kOff_EquipTable_Array = 0x08; // entry[] base
     inline constexpr uintptr_t kOff_EquipTable_Count = 0x10; // u32
     // 0xC8 -> 0xD0, following TrItemValue growing 0xC0 -> 0xC8: an entry is
@@ -1549,6 +1794,21 @@ namespace trinity::game
     inline constexpr uintptr_t kOff_ItemVal_DyeData  = 0x78; // 16-byte record[]
     inline constexpr uintptr_t kOff_ItemVal_DyeCount = 0x80; // u32
     inline constexpr uint32_t  kDye_MaxChannels      = 12;
+    // The dye record's own shape. These lived as bare numbers inside dye.cpp -
+    // `data + i * 16 + 6` and friends - which is precisely why a 153-constant
+    // audit of this header could sweep the whole build and still miss them. A
+    // struct offset that is not named here is a struct offset nobody checks
+    // after a patch, and the move-owner offset that hid in teleport.cpp through
+    // all of 2.01.00 is the same lesson learned twice.
+    //
+    // Read straight off the upsert's copy block at 0x1423558AE..0x1423558EB,
+    // which moves rec[0x00..0x0C] into the record one field at a time, and off
+    // its `shl rcx, 4` stride at 0x14235587F. Unchanged since 2.01.00.
+    inline constexpr uintptr_t kDyeRec_Stride        = 16;
+    inline constexpr uintptr_t kOff_DyeRec_Channel   = 0x06; // u8
+    inline constexpr uintptr_t kOff_DyeRec_R         = 0x07; // u8
+    inline constexpr uintptr_t kOff_DyeRec_G         = 0x08; // u8
+    inline constexpr uintptr_t kOff_DyeRec_B         = 0x09; // u8
 
     // --- Abyss Gear sockets (live-cracked 2026-07-18; see the abyss-gear note) -
     // Every worn item's TrItemValue carries a socket list right next to its dye
@@ -1737,28 +1997,44 @@ namespace trinity::game
     //    body, not the trampoline: MinHook needs five bytes to patch and the
     //    trampoline is exactly five bytes long.
     //
-    // Frame size wildcarded, everything semantic kept. Verified: exactly one
-    // match in 2658, at 0x14D6E97D0.
-    inline constexpr const char* kSig_FriendlySetNpc_20001 =
-        "49 89 E3 53 55 56 57 41 56 48 83 EC ?? 48 89 D7 48 8D 69 18 "
-        "0F B7 42 04 66 41 89 43 08";
-
-    // The 2.00.00 shape, kept as a fallback (see above for what changed).
+    // TU 2.01.00 (build 2760) broke all three NPC patterns and the pet one at
+    // once, and this time nothing semantic changed at all: the `lea rbp,[rcx+
+    // 0x18]` that carried the map offset is simply gone, folded into how the
+    // recompiled body indexes the map. The prologue is otherwise the same
+    // function it has always been.
+    //
+    // So both signatures now anchor INSIDE the body, on the map access itself,
+    // and are installed with InstallHookInterior (the function start comes from
+    // the unwind tables). The two setters remain byte-for-byte the same code
+    // compiled against different base offsets, and the map offsets are still
+    // the entire difference between them:
+    //
+    //     NPC  count [rsi+0x18]  buckets [rsi+0x28]  values [rsi+0x30]
+    //     pet  count [rsi+0x38]  buckets [rsi+0x48]  values [rsi+0x50]
+    //
+    // Those offsets must never be wildcarded - wildcard them and the two
+    // patterns collapse into each other, and the pet hook lands on NPCs.
+    //
+    // Both still end in the same record-replacement copy: find the record whose
+    // key at +0x00 matches, then blit 0x68 bytes over it (three vmovups plus a
+    // vmovsd tail), which is how the trust value at record+0x20 gets written.
+    // That confirms these are the setters and not some neighbouring lookup.
+    //
+    // The bodies still live outside the main code section, reached through a
+    // 5-byte `E9` trampoline - the packer's region, `.debug$P` in this build
+    // (it renames its sections every patch, so nothing may key on the name).
+    // These patterns describe the real body, not the trampoline: MinHook needs
+    // five bytes to patch and the trampoline is exactly five bytes long.
+    //
+    // Verified in 2760: one match each, NPC at 0x14D882B40, pet at 0x141E2AD40.
+    // The older prologue-based patterns are dropped rather than kept as
+    // fallbacks: they described a `lea` that no longer exists, so they could
+    // only ever fail, and carrying dead patterns makes a log say "tried 3
+    // variants" when it really tried one idea three times.
     inline constexpr const char* kSig_FriendlySetNpc =
-        "49 89 E3 53 55 56 57 41 56 48 83 EC 60 48 89 D7 B8 ?? ?? ?? ?? "
-        "03 05 ?? ?? ?? ?? 48 8D 2C 01 0F B7 42 04 66 41 89 43 08";
-
-    // The 1.18.0 shape of the same function, kept as a fallback. That build
-    // computed the base offset at runtime instead of baking it in, and since
-    // the constant has now flipped back once already, the old form is likely to
-    // return - carrying both costs nothing and keeps Trust Multiplier alive
-    // either way.
-    inline constexpr const char* kSig_FriendlySetNpc_1180 =
-        "49 89 E3 53 55 56 57 41 56 48 83 EC 60 48 89 D7 8B 05 ? ? ? ? "
-        "2D ? ? ? ? 48 8D 2C 01 0F B7 42 04 66 41 89 43 08";
+        "39 6E 1C 74 ?? 44 8B 00 8B 4E 18 85 C9";
     inline constexpr const char* kSig_FriendlySetPet =
-        "4C 8B DC 53 55 56 57 41 56 48 83 EC 60 48 8B FA 48 8D 69 38 "
-        "0F B7 42 04 66 41 89 43 08";
+        "39 6E 3C 74 ?? 44 8B 00 8B 4E 38 85 C9";
 
     // The OTHER trust write path, and the one that actually carries greet,
     // dialogue rewards, petting, feeding and wild taming. The two setters
@@ -1809,13 +2085,213 @@ namespace trinity::game
     // / `lea rdx,[rbp+Y]` - with only the two frame displacements wildcarded.
     // Verified: exactly one match in 2658, at 0x14250D579, whose E8 sits at
     // +0x15 and therefore returns to +0x1A.
+    // 2760 changed exactly one BIT of this: `movzx r8d,[rsi+0x30]` became
+    // `movzx r8d,[r14+0x30]`, so the REX byte went 44 -> 45. Everything else,
+    // including the argument shuffle and the 0x30 struct offset, is identical
+    // to 2658. That one bit is also what identifies the site as the mount's:
+    // of the accumulator's four call sites, only this one still matches the
+    // shape the old comment described. Unique (1) at 0x142880E62, inside the
+    // mount function 0x142880DC0.
     inline constexpr const char* kSig_FriendlyMountGainCall =
-        "48 8D 45 ? 48 89 44 24 20 4D 8B CD 44 0F B7 46 30 48 8D 55 ? E8";
+        "48 8D 45 ?? 48 89 44 24 20 4D 8B CD 45 0F B7 46 30 "
+        "48 8D 55 ?? E8";
     inline constexpr uintptr_t   kOff_MountGainCall_Ret = 0x1A;
 
     inline constexpr const char* kSig_FriendlyAddDelta =
         "66 44 89 44 24 18 55 53 57 41 56 41 57 48 8D 6C 24 ? 48 81 EC ? ? ? ? "
         "4C 89 CF 41 0F B7 D8 49 89 D6 49 89 CF 4D 85 C9";
+    // The NPC interaction dispatcher - the caller that hands greet, dialogue
+    // and gift their trust change. Hooking THIS is the way back to scaling
+    // greet without touching kSig_FriendlyAddDelta, which cannot be hooked:
+    //
+    //   the accumulator 0x14D6F3350 has SPLIT unwind data - a 60-byte
+    //   RUNTIME_FUNCTION plus two more entries starting inside its own body -
+    //   so patching its prologue leaves the unwinder replaying pushes that are
+    //   no longer there. That is why a detour doing NOTHING still killed the
+    //   game at +0x239BEF9, which is itself inside the second NPC interaction
+    //   function, on the way back out. Every function Trinity hooks safely
+    //   (the trust setters, the master frame update) has ONE unwind entry
+    //   spanning its whole body. This dispatcher does too: a single
+    //   0x14239BC40..0x14239BD65, 293 bytes, nothing starting inside it.
+    //
+    // It also keeps the mount away from us. The accumulator has four call
+    // sites and they live in four different functions - NPC greet/dialogue
+    // here, a second NPC site in 0x14239BD70, wild animals in 0x1405243F0,
+    // and the MOUNT in 0x14250D4E0. Scaling a mount gain is separately fatal
+    // (+0x374E2E6, inside the mount class), so staying out of that function
+    // matters. This one has two callers and neither is the mount function,
+    // and the mount function does not reach it within two call levels - but
+    // that is a bounded static search past which virtual dispatch is opaque,
+    // so the first build using this only WATCHES.
+    //
+    // Inside, the delta the engine is about to apply is reached as
+    //   rsi = [rcx+0x08]; rdi = [rsi]; selector = [rdi+0x8A]; delta = [rdi+0x20]
+    // with the selector picking a whole-record write (gift) over a raw delta
+    // (greet/dialogue) at 0x14239BC73.
+    //
+    // Verified: exactly one match in 2658, at 0x14239BC40.
+    inline constexpr const char* kSig_FriendlyNpcInteract =
+        "40 53 55 56 57 41 54 41 56 41 57 48 83 EC 30 48 8B 79 08";
+
+    // The COMMIT half of the interaction, and the one that matters.
+    //
+    // NPC interaction is two calls, not one. The dispatcher validates first
+    // (kSig_FriendlyNpcInteract, 0x1426E9AE0 in 2850) and commits afterwards
+    // (0x1426E9C10) - paired at 0x1426BE5BA/0x1426BE76B and again at
+    // 0x1426EA96A/0x1426EAA42. Both walk the same record array; only the
+    // second adds the delta to durable trust.
+    //
+    // Trinity scaled the delta inside the VALIDATE hook and restored it the
+    // moment that call returned, so the commit that reads it always saw the
+    // original. The log said "N trust gain(s) multiplied" throughout, and it
+    // was true in the narrowest sense: a value really was multiplied, then put
+    // back before anything read it. That is why this never worked - on 2760
+    // either. Scaling during validate is also the wrong side of the bounds
+    // check that phase performs.
+    //
+    // Interior anchor on the record-array walk rather than the prologue: the
+    // prologue is generic (wildcard the frame size and the same opening
+    // matches five other functions) while this is the function doing its job.
+    //     49 8B 5E 08     mov rbx, [r14+0x08]   ; kOff_NpcInteract_Data
+    //     41 8B 46 10     mov eax, [r14+0x10]   ; kOff_NpcInteract_Count
+    //     48 8D 04 C3     lea rax, [rbx+rax*8]  ; end = data + count*8
+    //     48 89 45 ??     mov [rbp-0x31], rax
+    //     48 3B D8        cmp rbx, rax
+    // Unique in 2850, at 0x1426E9C60, inside 0x1426E9C10.
+    inline constexpr const char* kSig_FriendlyNpcCommit =
+        "49 8B 5E 08 41 8B 46 10 48 8D 04 C3 48 89 45 ?? 48 3B D8";
+
+    // The ONE call that awards greet and dialogue trust, and the only place
+    // Trinity can multiply it without killing the game.
+    //
+    // FriendlyAddDelta is what actually applies the award, and it cannot be
+    // hooked: 0x141E2DA80 is a five-byte thunk into 0x14D88DD20, which lives
+    // in the packed section with SPLIT RUNTIME_FUNCTION entries, so a
+    // prologue detour corrupts stack unwinding - that is the crash users saw
+    // on horseback, and why kHookTrustDelta has been false ever since. The
+    // mount reaches the same function from its own call site (0x1428825B7),
+    // so even a working hook would fire where it must not.
+    //
+    // This matches the call SITE inside the NPC interaction commit instead:
+    //     4C 8B 4D 7F     mov   r9, [rbp+0x7F]       ; the delta
+    //     44 0F B7 47 30  movzx r8d, word [rdi+0x30] ; group id
+    //     48 8D 55 67     lea   rdx, [rbp+0x67]      ; &status
+    //     E8 ?? ?? ?? ??  call  0x141E2DA80
+    // with a fifth argument already homed at 0x1426E9D57 (`mov [rsp+0x20],
+    // r12`), so the proxy takes five.
+    //
+    // Safe because 0x1426E9C10 has exactly two callers (0x1426BE76B and
+    // 0x1426EAA42), both player-NPC interaction, and the mount reaches
+    // neither. Displacements wildcarded; the register choice and the +0x30
+    // group offset are the identity. Verified: one match in 2850, at
+    // 0x1426E9D5C.
+    inline constexpr const char* kSig_FriendlyCommitAddCall =
+        "4C 8B 4D ?? 44 0F B7 47 30 48 8D 55 ?? E8";
+
+    // The GREET reward's call into FriendlySetNpc, identified so the setter
+    // hook can tell a reward from a load.
+    //
+    // FriendlySetNpc has exactly six callers, verified by scanning every E8 in
+    // the image against the thunk at 0x141E2BB60:
+    //     0x140712CB2  save-game load          -> must NOT scale
+    //     0x14170051E  area streaming sync     -> must NOT scale
+    //     0x1426E9BDF  dialogue commit         -> a reward
+    //     0x1427A6B7D  gift commit             -> a reward (already scaled)
+    //     0x1427A7576  gift commit             -> a reward (already scaled)
+    //     0x14287B8E5  GREET reward            -> a reward, and the missing one
+    //
+    // Every one of them hands over a byte-identical 0x68 record, so the record
+    // cannot say which it is; only the return address can. Trinity seeds a
+    // first-sight relationship unscaled - correct for the load bursts, and
+    // exactly wrong for a greet, which IS a first sight and never gets a
+    // second call to scale on. That is why gifting worked (opening the menu
+    // had already seeded the entry) and greeting never did.
+    //
+    //     48 8B 4E 68              mov rcx, [rsi+0x68]
+    //     48 8D 55 80              lea rdx, [rbp-0x80]   ; a STACK record
+    //     48 8B 89 40 01 00 00     mov rcx, [rcx+0x140]  ; player FriendlyComponent
+    //     E8 ?? ?? ?? ??           call FriendlySetNpc
+    //     66 41 3B DD              cmp bx, r13w
+    //
+    // Note `lea rdx, [rbp-0x80]`: the record is on the CALLER'S STACK and is
+    // copied into the heap map by the callee. Anything that remembers that
+    // pointer past the call is pointing at a dead frame - which is exactly how
+    // an earlier attempt came to write into abandoned stack memory and report
+    // success. Scale it here, in the call, or not at all.
+    //
+    // Verified: one match in 2850, at 0x14287B8D6.
+    inline constexpr const char* kSig_FriendlyGreetSet =
+        "48 8B 4E 68 48 8D 55 80 48 8B 89 40 01 00 00 E8 ?? ?? ?? ?? "
+        "66 41 3B DD";
+    // Byte offset of the instruction AFTER the call - what _ReturnAddress()
+    // reports inside the hook.
+    inline constexpr uintptr_t kOff_GreetSet_Ret = 0x14;
+
+    // The SECOND reward caller, and the one the player's greets actually use.
+    //
+    // 0x1426E9AE0 is the interaction DISPATCHER: it walks the pending-reward
+    // array (data at +0x08, count at +0x10, one record* every 8 bytes) and
+    // applies each entry one of two ways - a raw delta through
+    // FriendlyAddDelta when [rec+0x9B] is zero, or a whole-record set through
+    // FriendlySetNpc/FriendlySetPet when it is not. Every record it touches is
+    // a pending reward by construction, which is what makes its return
+    // addresses safe to trust where a bare record is not.
+    //
+    // Trinity already knew this call site existed - the caller inventory above
+    // lists 0x1426E9BDF as "dialogue commit" - and wired only 0x14287B8E5. A
+    // live log settled which one greeting uses: three greets in one minute all
+    // arrived from 0x1426E9BE4, and none from the address Trinity had.
+    //
+    // The interaction WINDOW that shipped before this could never have caught
+    // them either. It was stamped on the COMMIT (0x1426E9C10) and the
+    // dispatcher runs first, so by the time the clock was set the setter call
+    // it was meant to cover had already returned. Not one record in a full
+    // session logged as being inside the window, which is the measurement that
+    // retired it.
+    //
+    //     48 8D 53 30              lea rdx, [rbx+0x30]   ; the record
+    //     49 8B 06                 mov rax, [r14]
+    //     48 8B 48 68              mov rcx, [rax+0x68]
+    //     48 8B 89 40 01 00 00     mov rcx, [rcx+0x140]  ; player FriendlyComponent
+    //     74 07                    je  +7                ; [rbx+0x99] picks which
+    //     E8 ?? ?? ?? ??           call FriendlySetPet
+    //     EB 05                    jmp +5
+    //     E8 ?? ?? ?? ??           call FriendlySetNpc
+    //
+    // Verified: one match in 2850, at 0x1426E9BC4.
+    inline constexpr const char* kSig_FriendlyRewardApply =
+        "48 8D 53 30 49 8B 06 48 8B 48 68 48 8B 89 40 01 00 00 74 07 "
+        "E8 ?? ?? ?? ?? EB 05 E8";
+    // Instruction AFTER each of the two calls - what _ReturnAddress() reports
+    // inside hkSetPet and hkSetNpc respectively.
+    inline constexpr uintptr_t kOff_RewardApply_PetRet = 0x19; // 0x1426E9BDD
+    inline constexpr uintptr_t kOff_RewardApply_NpcRet = 0x20; // 0x1426E9BE4
+    // Offset of the 0xE8 inside that match.
+    inline constexpr uintptr_t kOff_CommitAddCall_Call = 13;
+    // Live-confirmed 2026-09-05 on build 2760: rcx+0x08 is NOT a pointer to a
+    // record, it is a VECTOR's data pointer, with the element count at
+    // rcx+0x10 and one record* every 8 bytes. Reading it as a single record
+    // is what made the first probe say "record not readable" on most calls -
+    // the vector is usually empty, and only a call that actually carries a
+    // gain has an element in it. When one did, the delta read back as 1,
+    // which is what a greet is worth.
+    inline constexpr uintptr_t kOff_NpcInteract_Data     = 0x08; // record*[] data
+    inline constexpr uintptr_t kOff_NpcInteract_Count    = 0x10; // u32 element count
+    // Sanity bound on the count before we walk it, and a cap on how many
+    // records one call may borrow - both exist so a wrong offset produces a
+    // no-op rather than a walk through arbitrary memory.
+    inline constexpr uint32_t  kNpcInteract_MaxCount     = 256;
+    inline constexpr int       kNpcInteract_MaxScaled    = 16;
+    // The 0x8A selector this once carried is REMOVED. It was inferred, never
+    // observed - the probe that would have confirmed it never ran, because the
+    // game patched first - and in 2760 the gate at this point in the
+    // dispatcher is a byte at record+0x9B, not +0x8A. Rather than carry an
+    // unverified offset that a probe would then print with confidence, the
+    // probe reports only the delta, which is not inferred at all: the
+    // dispatcher loads it into r9 as the accumulator's argument, in plain
+    // sight at `mov r9,[rbx+0x20]`.
+    inline constexpr uintptr_t kOff_NpcInteractRec_Delta = 0x20; // i64 gain
+
     inline constexpr uintptr_t kOff_FriendlyRec_Key   = 0x00; // u32 record key
     inline constexpr uintptr_t kOff_FriendlyRec_Group = 0x04; // u16 group/bucket key
     inline constexpr uintptr_t kOff_FriendlyRec_Value = 0x20; // i64 trust value
@@ -1837,14 +2313,22 @@ namespace trinity::game
     // cannot match it at any offset. `44 8B 41 ?` is the disp8 form of
     // `mov r8d,[rcx+disp]`; this build needs disp32 - `44 8B 81 80 00 00 00` -
     // which is a different ENCODING, not a different number.
-    inline constexpr const char* kSig_DyeUpsert_1180 =
-        "48 8B 41 78 4C 8B D1 44 8B 81 80 00 00 00 49 C1 E0 04";
 
     // --- Durability / Repair ---------------------------------------------------
-    inline constexpr uintptr_t kOff_ItemDef_MaxEndurance = 0x3F0;   // u16, ItemInfo row
+    // 0x3F0 before TU 2.02.00. The ItemInfo row grew by 16 bytes ahead of this
+    // field, which no byte signature can see: the deserialiser proves it at
+    // 0x14147EDC5 `lea rdx, [rsi + 0x400]`, immediately before the error string
+    // for _maxEndurance. Trinity reads it in MaxEnduranceForType, where a stale
+    // offset does not fail loudly - it reads a neighbouring field and either
+    // trips the 0/0xFFFF guard or, worse, returns a plausible wrong cap.
+    inline constexpr uintptr_t kOff_ItemDef_MaxEndurance = 0x400;   // u16, ItemInfo row
     inline constexpr uintptr_t kOff_ItemVal_Endurance    = 0x40;    // u16, live item value
     inline constexpr uint16_t  kEndurance_None           = 0xFFFF;  // "this item has none"
-    inline constexpr uintptr_t kOff_ItemDef_RepairDataList = 0x3F8; // vector
+    // 0x3F8 before TU 2.02.00, moved with its neighbour above - proof at
+    // 0x14147EDE5 `lea rdx, [rsi + 0x408]`. Nothing reads it yet; it is kept
+    // because it is how the endurance field's new home was pinned down, and
+    // the next person to look will want the row's shape, not one offset.
+    inline constexpr uintptr_t kOff_ItemDef_RepairDataList = 0x408; // vector
 
     // How many slots Add Item quietly expands a storage to when it is about to overflow.
     inline constexpr int kAddRoom_TargetSlots = 2000;

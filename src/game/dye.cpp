@@ -42,7 +42,22 @@ namespace trinity::game
         // --- Resolved engine entry points --------------------------------
         using EquipBatch_t    = void* (__fastcall*)(void*, void*, void*, void*);
         using DyeApplyBatch_t = int*  (__fastcall*)(void*, int*, void*);
-        using DyeUpsert_t     = void* (__fastcall*)(void*, const void*);
+        // FOUR arguments. The third and fourth are pointers to 16-byte
+        // {buffer, length} scratch structures that the engine writes
+        // through - it dereferences both (`mov rsi,[r8]`, `mov rbx,[r9]`).
+        // Trinity used to pass two, so those registers held whatever the
+        // detour happened to leave there. The reads were caught by the
+        // __try around the call, which is exactly why this looked like
+        // "the engine refused to create the rest" in the log rather than
+        // like a bug in Trinity.
+        //
+        // The engine's own call sites (0x142A09D84, 0x142AD6977) build each
+        // one as {pointer to a stack buffer, 0}, so we do the same.
+        // Two arguments, no return: the record is copied into the matching
+        // channel slot, or appended while the count is under twelve. The
+        // four-argument shape this used to declare belonged to a different
+        // function entirely - see kSig_DyeUpsert.
+        using DyeUpsert_t     = void (__fastcall*)(void* itemVal, const void* rec);
 
         EquipBatch_t    oEquipBatch   = nullptr;
         void*           g_equipTarget = nullptr;
@@ -213,14 +228,32 @@ namespace trinity::game
             __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
         }
 
+        // Returns whether the record is ACTUALLY there afterwards, not whether
+        // the call returned. The upsert has a silent no-op of its own - it
+        // gives up when the vector already holds twelve channels
+        // (`cmp r10d, 0xC; jae ret`) - and reporting that as success is how
+        // twelve channels came to be logged as durable while the count stayed
+        // at zero. Checking costs one read; believing costs a save.
         bool CallDyeUpsert(uintptr_t itemVal, const uint8_t rec[16])
         {
             __try
             {
                 g_dyeUpsert(reinterpret_cast<void*>(itemVal), rec);
-                return true;
             }
             __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+
+            uintptr_t data  = 0;
+            uint32_t  count = 0;
+            if (!ReadPtr(itemVal + kOff_ItemVal_DyeData, &data) || data < kMinPointer) return false;
+            if (!Read32(itemVal + kOff_ItemVal_DyeCount, &count) ||
+                count == 0 || count > kDye_MaxChannels) return false;
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                uint8_t ch = 0;
+                if (Read8(data + i * kDyeRec_Stride + kOff_DyeRec_Channel, &ch) && ch == rec[6])
+                    return true;
+            }
+            return false;
         }
 
         // Raw (floorless) byte access for the TLS realm flag - it lives far
@@ -305,15 +338,16 @@ namespace trinity::game
                 for (uint32_t i = 0; i < count; ++i)
                 {
                     uint8_t rc = 0;
-                    if (!Read8(data + i * 16 + 6, &rc) || rc != ch) continue;
-                    const uintptr_t a = data + i * 16;
+                    const uintptr_t a = data + i * kDyeRec_Stride;
+                    if (!Read8(a + kOff_DyeRec_Channel, &rc) || rc != ch) continue;
                     bool ok = true;
-                    ok &= Write8(a + 7, recs[ch][7]);   // R
-                    ok &= Write8(a + 8, recs[ch][8]);   // G
-                    ok &= Write8(a + 9, recs[ch][9]);   // B
+                    ok &= Write8(a + kOff_DyeRec_R, recs[ch][kOff_DyeRec_R]);
+                    ok &= Write8(a + kOff_DyeRec_G, recs[ch][kOff_DyeRec_G]);
+                    ok &= Write8(a + kOff_DyeRec_B, recs[ch][kOff_DyeRec_B]);
                     if (!ok) g_dyeMirrorDead = true;  // a bad write kills the path for the session
                     uint8_t back = 0;
-                    if (ok && Read8(a + 7, &back) && back == recs[ch][7]) ++written;
+                    if (ok && Read8(a + kOff_DyeRec_R, &back) &&
+                        back == recs[ch][kOff_DyeRec_R]) ++written;
                     done = true;
                     break;
                 }
@@ -572,24 +606,21 @@ namespace trinity::game
         }
         g_dyeApply = reinterpret_cast<DyeApplyBatch_t>(apply);
 
-        // Current build's encoding first, the older one as a fallback - the two
-        // are the same function compiled with different displacement forms, so
-        // one pattern can never cover both.
-        size_t which = 0;
-        const std::string_view upsertSigs[] = { kSig_DyeUpsert_1180, kSig_DyeUpsert };
-        const uintptr_t upsert = mem::FindPatternAny(upsertSigs, 2, mem::GameModule(), &which);
+        // One pattern now. The two older ones described a prologue that 2.01.00
+        // removed outright, so keeping them would only make a failure log claim
+        // it tried several ideas when it tried one idea three times.
+        const uintptr_t upsert = mem::FindPattern(kSig_DyeUpsert);
         if (!upsert)
             LOG_WARN("dye: upsert signature NOT FOUND - falling back to a direct RGB write, so "
                      "channels without an existing record will not survive a reload.");
-        else if (mem::CountMatches(upsertSigs[which], 2) != 1)
+        else if (mem::CountMatches(kSig_DyeUpsert, 2) != 1)
         {
             LOG_WARN("dye: upsert signature ambiguous - falling back to a direct RGB write.");
             g_dyeUpsert = nullptr;
         }
         else
         {
-            LOG("dye: durable upsert @ %p (pattern #%zu).",
-                reinterpret_cast<void*>(upsert), which);
+            LOG("dye: durable upsert @ %p.", reinterpret_cast<void*>(upsert));
             g_dyeUpsert = reinterpret_cast<DyeUpsert_t>(upsert);
         }
 
