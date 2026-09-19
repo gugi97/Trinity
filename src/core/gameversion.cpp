@@ -18,6 +18,16 @@ namespace trinity
         // say so rather than imply a guarantee that was never made.
         struct KnownBuild { uint16_t revision; const char* tu; bool verified; };
         constexpr KnownBuild kKnown[] = {
+            { 2944, "2.03.00",          true  },  // verified: this patch broke exactly 2 of 42 byte
+                                                  // signatures. kSig_InvFreePlacements died on a
+                                                  // baked-in jump displacement (0x57 -> 0x5E) while
+                                                  // the function had not moved at all; kSig_TravelToNode
+                                                  // was recompiled AND gained a fourth argument, a mode
+                                                  // that must be 0 for node travel. Every struct offset
+                                                  // a scan cannot see was audited separately and none
+                                                  // moved. Add Item, Fast Travel, durable dye, refine,
+                                                  // sockets, teleport, Easy Parry and the abyss gear
+                                                  // effect chain were each run in-game on this build
             { 2850, "2.02.00",          true  },  // verified: this patch moved no byte signature at
                                                   // all (0 of 41 gone), and the struct offsets a scan
                                                   // cannot see were audited separately. Add Item,

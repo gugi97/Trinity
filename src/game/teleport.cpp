@@ -309,7 +309,9 @@ namespace trinity::game
 
         // --- Fast-travel catalog / trigger ---------------------------------
         // sub_505140(ignored, sceneId, nodeIndex) - the game's own fast travel.
-        using TravelFn = char(__fastcall*)(void*, int, unsigned int);
+        // Four arguments since TU 2.03.00 - the last is a mode, and node
+        // travel needs 0. See kSig_TravelToNode for where that is read from.
+        using TravelFn = char(__fastcall*)(void*, int, unsigned int, unsigned int);
         TravelFn   g_travelFn = nullptr;
 
         // Data-table resolvers, found by the string-anchored scan in Install()
@@ -1253,7 +1255,8 @@ namespace trinity::game
                 g_pendValid.store(false, std::memory_order_release);
                 if (scene >= 0 && index >= 0)
                 {
-                    __try { g_travelFn(nullptr, scene, static_cast<unsigned int>(index)); }
+                    __try { g_travelFn(nullptr, scene, static_cast<unsigned int>(index),
+                                      kTravelMode_Node); }
                     __except (EXCEPTION_EXECUTE_HANDLER) {}
                 }
             }

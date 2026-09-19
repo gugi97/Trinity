@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cctype>
 #include <map>
+#include <set>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -193,6 +194,63 @@ namespace trinity::game
         // prettified keys in one "Uncategorised" group, storages to their engine
         // key, and nothing draws an icon.
         uintptr_t g_grpTableGlobal = 0;
+        uintptr_t g_skillTableGlobal = 0;
+        uintptr_t g_buffTableGlobal = 0;
+        uintptr_t g_patTableGlobal  = 0;
+        uintptr_t g_equipTypeTableGlobal = 0;
+
+        // The engine's stat-line formatter - see kSig_FormatBuffValue. Null
+        // when the signature did not resolve, and then a gear line is the bare
+        // template, which still names the stat.
+        using FormatBuffValue_t = uint32_t* (__fastcall*)(
+            const void* desc, uint32_t* status, uint8_t mode, uint32_t level,
+            uint32_t count, void* outText, uint32_t* outStyle, const uint8_t* context);
+        FormatBuffValue_t g_formatBuff = nullptr;
+
+        // One formatted stat line, or false.
+        //
+        // The engine writes into a pa::String we own. It is zeroed first so the
+        // heap pointer at +0x108 is null and the text lands in the inline
+        // buffer - handing the assign a garbage pointer there is the one way
+        // this call could corrupt anything.
+        //
+        // Wrapped because this is the only place Trinity calls an engine
+        // function with arguments it derived rather than intercepted. The
+        // arguments come from the game's own call site and the function was
+        // read end to end, but "read carefully" is not the same as "cannot
+        // fault", and a menu row is not worth a crash. A fault here costs the
+        // number and nothing else.
+        bool FormatBuffLine(const void* desc, uint32_t level, uint32_t count,
+                            char* out, size_t n)
+        {
+            if (!g_formatBuff || !desc || !out || n == 0) return false;
+            out[0] = 0;
+
+            alignas(8) uint8_t text[kPaString_Size] = {};
+            *reinterpret_cast<uint32_t*>(text + kOff_PaStr_Cap) = kPaStr_Capacity;
+
+            uint32_t      status  = 0xFFFFFFFFu;
+            uint32_t      style   = 0;
+            const uint8_t context = kBuffFmt_Context;
+
+            __try
+            {
+                g_formatBuff(desc, &status, kBuffFmt_Mode, level, count,
+                             text, &style, &context);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                LOG_WARN("inventory: the stat-line formatter faulted - abyss gear "
+                         "rows will show their template without a number.");
+                g_formatBuff = nullptr;   // once is enough; do not keep trying
+                return false;
+            }
+            if (status != 0) return false;
+
+            const char* heap = *reinterpret_cast<char* const*>(text + kOff_PaStr_Heap);
+            const char* str  = heap ? heap : reinterpret_cast<const char*>(text);
+            return ReadCString(reinterpret_cast<uintptr_t>(str), out, n) && out[0] != 0;
+        }
         uintptr_t g_strTableGlobal = 0;
         uintptr_t g_invTableGlobal = 0;
         uintptr_t g_locMgrGlobal   = 0;
@@ -524,6 +582,118 @@ namespace trinity::game
             }
             out[o] = 0;
             if (o == 0) snprintf(out, n, "%s", key);
+        }
+
+        // The engine's description strings carry HTML-ish markup - abyss gears
+        // use "<br/><br/>" to separate the generic paragraph from the sentence
+        // about that particular gear. ImGui draws those tags literally, so the
+        // player reads them. Turn a break into a real newline and drop anything
+        // else in angle brackets.
+        //
+        // Deliberately not a general HTML parser: this handles the one tag the
+        // game actually uses and discards the rest rather than guessing.
+        void StripMarkup(char* s)
+        {
+            if (!s) return;
+            size_t o = 0;
+            for (size_t i = 0; s[i]; )
+            {
+                if (s[i] != '<') { s[o++] = s[i++]; continue; }
+                const size_t start = i;
+                while (s[i] && s[i] != '>') ++i;
+                if (!s[i]) { s[o++] = s[start]; i = start + 1; continue; } // unclosed: keep it
+                const size_t len = i - start - 1;
+                if ((len == 2 && _strnicmp(s + start + 1, "br", 2) == 0) ||
+                    (len == 3 && _strnicmp(s + start + 1, "br/", 3) == 0))
+                {
+                    // Collapse a run of breaks into one line break, so the
+                    // engine's doubled <br/><br/> does not open a gap.
+                    if (o && s[o - 1] != '\n') s[o++] = '\n';
+                }
+                ++i; // step past the '>'
+            }
+            s[o] = 0;
+            // Trim what the tags leave at either end.
+            size_t b = 0;
+            while (s[b] && isspace(static_cast<unsigned char>(s[b]))) ++b;
+            if (b) memmove(s, s + b, strlen(s + b) + 1);
+            size_t e = strlen(s);
+            while (e && isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+            s[e] = 0;
+        }
+
+        // Resolve the {...} tokens the engine leaves in a formatted stat line.
+        //
+        // FormatBuffValue fills in the NUMBER but not these: "{Key:Key_NorAttack}"
+        // is a keybind and "{Staticinfo:Status:ClimbSpeedRate}" a stat name, and
+        // both are substituted a layer later by the game's own text pass, which
+        // a mod is not inside. Left alone they read as literal braces on screen.
+        //
+        // The last colon-separated segment is the human-meaningful part in every
+        // form seen, so take it and run it through Prettify: ClimbSpeedRate ->
+        // "Climb Speed Rate". A leading Key_ is dropped because it names the
+        // namespace again, not the thing.
+        //
+        // This is a substitution, not a parser. An unclosed brace is left alone
+        // rather than guessed at.
+        void ResolveTokens(char* s, size_t cap)
+        {
+            if (!s) return;
+            for (char* open = strchr(s, '{'); open; open = strchr(open, '{'))
+            {
+                char* close = strchr(open, '}');
+                if (!close) return;                       // unclosed - leave it
+                *close = 0;
+                const char* body = open + 1;
+
+                // (The bounded token dump that measured this vocabulary is
+                // removed - it answered its question and 24 lines of it was
+                // most of a session's log.)
+                if (const char* colon = strrchr(body, ':')) body = colon + 1;
+                if (_strnicmp(body, "Key_", 4) == 0) body += 4;
+
+                // A live run printed every token the catalogue actually uses,
+                // and it is a closed set: NorAttack, HardAttack, Guard and
+                // Skill_1..7. Prettify turns all but the first into readable
+                // words already; "Nor Attack" is the one that is not a phrase.
+                // Expanding it is a lookup against measured vocabulary, not a
+                // guess at what abbreviations might exist.
+                const char* body2 = body;
+                if (_stricmp(body, "NorAttack") == 0) body2 = "Normal Attack";
+
+                char nice[96];
+                Prettify(body2, nice, sizeof(nice));
+
+                const size_t nlen = strlen(nice);
+                const size_t tail = strlen(close + 1);
+                const size_t head = static_cast<size_t>(open - s);
+                if (head + nlen + tail + 1 > cap) { *close = '}'; return; }
+                memmove(open + nlen, close + 1, tail + 1);
+                memcpy(open, nice, nlen);
+                open += nlen;
+            }
+        }
+
+        // Drop the shared preamble an item description opens with.
+        //
+        // Every abyss gear carries the same two sentences - "Grants a variety of
+        // effects when embedded in an equipment socket. Witches found in each
+        // region have the power to embed or remove Abyss gears." - and only
+        // what follows the break says what THIS gear does. Repeating the
+        // preamble on all 192 rows buries the one line the player opened the
+        // picker to read.
+        //
+        // Keep the last block, not the first. If that leaves nothing, the item
+        // had no per-item sentence and the whole text is the best available.
+        void TidyDesc(char* s)
+        {
+            StripMarkup(s);
+            char* last = strrchr(s, '\n');
+            if (!last) return;
+            ++last;
+            while (*last && isspace(static_cast<unsigned char>(*last))) ++last;
+            if (!*last) return;           // trailing break only - keep everything
+            memmove(s, last, strlen(last) + 1);
         }
 
         // --- Storage presentation: order, and names the game cannot give us ---
@@ -1625,6 +1795,43 @@ namespace trinity::game
         else
             LOG("inventory: ItemGroupInfo table resolved @ %p.", reinterpret_cast<void*>(g_grpTableGlobal));
 
+        // Optional, and only the abyss-gear picker uses it: without it a gear
+        // row falls back to its description text, which still says something.
+        g_skillTableGlobal = FindTableGlobal(kStr_SkillTable, /*indirect=*/true);
+        if (!g_skillTableGlobal)
+            LOG_WARN("inventory: Skill table not found - abyss gear rows cannot list "
+                     "their effects.");
+        else
+            LOG("inventory: Skill table resolved @ %p - gear effects listed in the picker.",
+                reinterpret_cast<void*>(g_skillTableGlobal));
+
+        // Abyss-gear effect text. Optional like the Skill table: without either
+        // one a gear row falls back to its description, which still says
+        // something. Both are the direct form.
+        g_formatBuff = reinterpret_cast<FormatBuffValue_t>(
+                           mem::FindPattern(kSig_FormatBuffValue));
+        if (!g_formatBuff)
+            LOG_WARN("inventory: stat-line formatter not found - abyss gear rows "
+                     "will name the stat without its number.");
+
+        // Slot names for the abyss gear picker. Direct form, like buffinfo.
+        g_equipTypeTableGlobal = FindTableGlobal(kStr_EquipTypeTable);
+        if (!g_equipTypeTableGlobal)
+            LOG_WARN("inventory: equiptypeinfo table not found - abyss gear rows "
+                     "cannot say which slots they fit.");
+
+        g_buffTableGlobal = FindTableGlobal(kStr_BuffInfoTable);
+        g_patTableGlobal  = FindTableGlobal(kStr_PatternDescTable);
+        if (!g_buffTableGlobal || !g_patTableGlobal)
+            LOG_WARN("inventory: %s table not found - abyss gear rows fall back to "
+                     "their description text.",
+                     !g_buffTableGlobal ? "buffinfo" : "patterndescriptioninfo");
+        else
+            LOG("inventory: buffinfo @ %p, patterndescriptioninfo @ %p - abyss gear "
+                "effects available.",
+                reinterpret_cast<void*>(g_buffTableGlobal),
+                reinterpret_cast<void*>(g_patTableGlobal));
+
         g_strTableGlobal = FindTableGlobal(kStr_StringInfoTable);
         if (!g_strTableGlobal)
             LOG_WARN("inventory: stringinfo table not found - no item or category icons.");
@@ -2434,6 +2641,34 @@ namespace trinity::game
                 {
                     continue; // never touched this bucket - leave it alone
                 }
+                else
+                {
+                    // Never restore a cap BELOW what the bucket is holding.
+                    //
+                    // The bug this closes: raise Slot Size, store more than the
+                    // vanilla cap, switch Slot Size off. The original expansion
+                    // goes back, the items do not, and the bucket is left with
+                    // used > cap. Free space is computed as cap - used in u16,
+                    // so it wraps to about 65000 and every planner decision
+                    // downstream is made on that number - which is why the
+                    // symptom is not "storage full" but items that cannot be
+                    // taken OUT any more.
+                    //
+                    // So the restore floors at what is actually stored, plus the
+                    // same margin the quest-reward headroom uses. This narrows
+                    // as far as it safely can and no further; a bucket that fits
+                    // its contents restores exactly as before, which is every
+                    // bucket that was never overfilled.
+                    uint16_t occ = 0, defSlots = 0, unusedMax = 0;
+                    if (Read16(bucket + kOff_InvBucket_UsedSlots, &occ) &&
+                        StorageSlotsForType(type, &defSlots, &unusedMax))
+                    {
+                        const int need = static_cast<int>(occ) + kInvHeadroom_Slots
+                                       - static_cast<int>(defSlots);
+                        if (need > static_cast<int>(expand) && need <= 0xFFFF)
+                            expand = static_cast<uint16_t>(need);
+                    }
+                }
 
                 int err = 0;
                 oSetExpandSlots(reinterpret_cast<void*>(holder), &err, type, expand);
@@ -2749,6 +2984,464 @@ namespace trinity::game
     {
         if (DisplayNameForType(typeId, out, n)) return true;
         return KeyForType(typeId, out, n);
+    }
+
+    // The abyss-gear half of EffectsForTypeId: walk _enchantDataList -> the
+    // buff rows -> the display template, and append one line per buff.
+    //
+    // Reads only. The number that fills the template's placeholder is computed
+    // by the engine and is added separately; until that lands, a line is the
+    // template with its placeholder shown as-is, which still names the stat.
+    static bool AppendBuffLines(uint16_t typeId, uintptr_t def, char* out, size_t n, size_t& used)
+    {
+        if (!g_buffTableGlobal || !g_patTableGlobal || !g_strTableGlobal) return false;
+
+        uintptr_t ench = 0;
+        uint32_t  ecnt = 0;
+        if (!ReadPtr(def + kOff_ItemDef_EnchantList, &ench) || ench < kMinPointer) return false;
+        if (!Read32(def + kOff_ItemDef_EnchantCount, &ecnt) || ecnt == 0) return false;
+
+        // Entry 0 is the unrefined row, which is the one a picker should show:
+        // the gear has not been socketed yet, so no higher level applies.
+        uintptr_t keys = 0;
+        uint32_t  kcnt = 0;
+        if (!ReadPtr(ench + kOff_EnchantRec_EquipBuffs, &keys) || keys < kMinPointer) return false;
+        if (!Read32(ench + kOff_EnchantRec_BuffCount, &kcnt) || kcnt == 0) return false;
+        if (kcnt > kBuff_MaxCount) kcnt = kBuff_MaxCount;
+
+        for (uint32_t i = 0; i < kcnt; ++i)
+        {
+            const uintptr_t key = keys + static_cast<uintptr_t>(i) * kBuffKey_Stride;
+            uint16_t buffRow = 0;
+            uint32_t buffLvl = 0;
+            if (!Read16(key + kOff_BuffKey_Row, &buffRow)) break;
+            Read32(key + kOff_BuffKey_Level, &buffLvl);
+
+            uintptr_t bdef = 0;
+            if (!DefForRow(g_buffTableGlobal, buffRow, &bdef)) continue;
+
+            // (The bounded shape probe that answered this is removed. It
+            // showed Aegis I/II/III all resolving to buffRow 154 with 30
+            // levels, which is what identified the level as the tier index.)
+
+            uintptr_t list = 0;
+            uint32_t  lcnt = 0;
+            if (!ReadPtr(bdef + kOff_BuffDef_DataList, &list) || list < kMinPointer) continue;
+            if (!Read32(bdef + kOff_BuffDef_DataCnt, &lcnt) || lcnt == 0) continue;
+
+            // Index by the entry's own level. Tiers of one gear share a buff
+            // row and differ only here, so taking element 0 printed tier I's
+            // number for all of them.
+            if (buffLvl >= lcnt) buffLvl = lcnt - 1;   // never walk past the list
+            const uintptr_t rec = list + static_cast<uintptr_t>(buffLvl) * kBuffData_Stride;
+
+            uintptr_t desc = 0;
+            if (!ReadPtr(rec + kOff_BuffData_Desc, &desc) || desc < kMinPointer) continue;
+
+            uint16_t pat = 0;
+            if (!Read16(desc + kOff_BuffDesc_Pattern, &pat) || pat == kPattern_None) continue;
+
+            uintptr_t pdef = 0;
+            if (!DefForRow(g_patTableGlobal, pat, &pdef)) continue;
+            uint16_t strRow = 0;
+            if (!Read16(pdef + kOff_PatternDef_StrKey, &strRow)) continue;
+
+            uintptr_t sdef = 0;
+            if (!DefForRow(g_strTableGlobal, strRow, &sdef)) continue;
+            char tmpl[160] = {};
+            if (!StringField(sdef + kOff_StrDef_Buffer, tmpl, sizeof(tmpl)) || !tmpl[0]) continue;
+
+            // The template carries a placeholder. Ask the engine to fill it;
+            // if it cannot, show the template anyway - it still names the stat.
+            uint32_t lvl = 0, cnt = 0;
+            Read32(rec + kOff_BuffData_Level, &lvl);
+            Read32(bdef + kOff_BuffDef_FormatArg, &cnt);
+            char line[192] = {};
+            const char* text = tmpl;
+            if (FormatBuffLine(reinterpret_cast<const void*>(desc), lvl, cnt,
+                               line, sizeof(line)))
+            {
+                ResolveTokens(line, sizeof(line));
+                text = line;
+            }
+
+            const int w = snprintf(out + used, n - used, "%s%s", used ? ", " : "", text);
+            if (w <= 0) break;
+            used += static_cast<size_t>(w);
+            if (used >= n - 1) break;
+        }
+        return out[0] != 0;
+    }
+
+    namespace
+    {
+        // hash -> the localised slot names that answer to it, joined.
+        //
+        // Built once from "equiptypeinfo" by inverting each row's
+        // _equipAbleHashList, which is what the engine does at startup. One pass
+        // over a few hundred rows, then every lookup is a map hit - so this
+        // costs nothing per frame and nothing per row drawn.
+        // Instance ids Trinity minted with Add Item this session.
+        //
+        // These items exist on the client and in the client's copy of the
+        // server holder, and nowhere else. They are not in the real server
+        // database, so when the engine reconciles a container it rebuilds them
+        // from a fetch result that has nothing to say about them - and their
+        // sockets come back as the item was constructed. That is the standing
+        // "added equipment reverts to its original abyss gear" report, and it
+        // is why a vendor-bought piece keeps its edits while a spawned one does
+        // not: the vendor piece has a real server record and this one does not.
+        //
+        // Trinity cannot fix that from the client. It CAN know which items are
+        // affected, because it issued the ids itself - so it says so instead of
+        // silently promising an edit it cannot keep.
+        std::set<int64_t> g_spawnedIds;
+        std::mutex        g_spawnedMx;
+
+        std::map<uint32_t, std::string> g_equipSlotNames;
+        bool g_equipSlotsBuilt = false;
+
+        void BuildEquipSlotMap()
+        {
+            g_equipSlotsBuilt = true;
+            if (!g_equipTypeTableGlobal) return;
+
+            uintptr_t table = 0;
+            uint32_t  rows  = 0;
+            if (!ReadPtr(g_equipTypeTableGlobal, &table)) return;
+            if (!Read32(table + kOff_ItemTable_Count, &rows) || rows == 0) return;
+            if (rows > 4096) rows = 4096;
+
+            for (uint32_t r = 0; r < rows; ++r)
+            {
+                uintptr_t row = 0;
+                if (!DefForRow(g_equipTypeTableGlobal, static_cast<uint16_t>(r), &row)) continue;
+
+                char name[96] = {};
+                if (!LocString(row + kOff_EquipType_Name, name, sizeof(name)) || !name[0]) continue;
+
+                uintptr_t list = 0;
+                uint32_t  cnt  = 0;
+                if (!ReadPtr(row + kOff_EquipType_HashList, &list) || list < kMinPointer) continue;
+                if (!Read32(row + kOff_EquipType_HashCnt, &cnt) || cnt == 0) continue;
+                if (cnt > kEquipType_MaxHashes) cnt = kEquipType_MaxHashes;
+
+                for (uint32_t i = 0; i < cnt; ++i)
+                {
+                    uint32_t h = 0;
+                    if (!Read32(list + static_cast<uintptr_t>(i) * 4, &h) || h == 0) continue;
+                    std::string& slot = g_equipSlotNames[h];
+                    // Several rows can answer to one hash - that is the whole
+                    // point of the inversion - so join rather than overwrite.
+                    if (slot.find(name) != std::string::npos) continue;
+                    if (!slot.empty()) slot += ", ";
+                    slot += name;
+                }
+            }
+            LOG("inventory: equip-slot map built - %zu hash(es) name a slot.",
+                g_equipSlotNames.size());
+        }
+    }
+
+    // Every hash a piece of equipment accepts in its sockets.
+    //
+    // ItemInfo+0x42 _equipTypeInfo is the piece's row in "equiptypeinfo" -
+    // confirmed at four independent call sites (0x140586DCE, 0x1405FA70F,
+    // 0x1409078B4, 0x14091097D), each guarding the 0xFFFF sentinel first - and
+    // that row's _equipAbleHashList is the list of gears it takes. Same list
+    // the inverted slot-name map is built from, so this is not a second
+    // opinion about compatibility, it is the same fact read the other way
+    // round.
+    static bool PieceHashList(uint16_t pieceTypeId, uintptr_t* list, uint32_t* count)
+    {
+        *list = 0; *count = 0;
+        if (!g_equipTypeTableGlobal) return false;
+
+        uintptr_t def = 0;
+        if (!DefForRow(g_itemTableGlobal, pieceTypeId, &def)) return false;
+        uint16_t row = 0;
+        if (!Read16(def + kOff_ItemDef_EquipTypeInfo, &row) || row == kEquipType_None)
+            return false;
+
+        uintptr_t erow = 0;
+        if (!DefForRow(g_equipTypeTableGlobal, row, &erow)) return false;
+        if (!ReadPtr(erow + kOff_EquipType_HashList, list) || *list < kMinPointer) return false;
+        if (!Read32(erow + kOff_EquipType_HashCnt, count) || *count == 0) return false;
+        if (*count > kEquipType_MaxHashes) *count = kEquipType_MaxHashes;
+        return true;
+    }
+
+    bool Inventory::IsModSpawned(int64_t instanceId)
+    {
+        if (instanceId == 0 || instanceId == -1) return false;
+        std::lock_guard<std::mutex> lk(g_spawnedMx);
+        return g_spawnedIds.find(instanceId) != g_spawnedIds.end();
+    }
+
+    bool Inventory::GearFitsSlot(uint16_t gearTypeId, uint16_t pieceTypeId)
+    {
+        // Fail OPEN. A filter that hides things has to be right, and when this
+        // cannot resolve the piece it does not know enough to hide anything -
+        // so it says yes. Showing a gear that does not fit costs one refused
+        // socket; hiding one that does fit locks the player out of it with no
+        // way to tell why.
+        uintptr_t list = 0;
+        uint32_t  cnt  = 0;
+        if (!PieceHashList(pieceTypeId, &list, &cnt)) return true;
+
+        uintptr_t gdef = 0;
+        if (!DefForRow(g_itemTableGlobal, gearTypeId, &gdef)) return true;
+        uint32_t gh = 0;
+        if (!Read32(gdef + kOff_ItemDef_EquipHash, &gh) || gh == 0) return true;
+
+        for (uint32_t i = 0; i < cnt; ++i)
+        {
+            uint32_t h = 0;
+            if (Read32(list + static_cast<uintptr_t>(i) * 4, &h) && h == gh) return true;
+        }
+        return false;
+    }
+
+    bool Inventory::GearRowText(uint16_t typeId, char* out, size_t n,
+                                size_t* effectLen)
+    {
+        if (effectLen) *effectLen = 0;
+        if (!out || n == 0) return false;
+        out[0] = 0;
+        size_t used = 0;
+
+        // The engine's own effect text often opens with the gear's name -
+        // "Crescent Moon Slash (Nor Attack after certain moves)". On a row that
+        // already shows the name, repeating it reads as a stutter and eats the
+        // width the effect needed: "Crescent Moon Slash [Crescent Moon Slash
+        // (Nor Attac...". Strip the prefix when it is there.
+        char selfName[80] = {};
+        NameForTypeId(typeId, selfName, sizeof(selfName));
+
+        // The order the game's own tooltip uses: what it does, where it goes,
+        // then the prose. Assembled here rather than in the menu so the caller
+        // does one call instead of three and no pointer arithmetic of its own -
+        // the version that lived up there grew an off-by-one the first time it
+        // was edited.
+        auto line = [&](const char* text, bool blankBefore)
+        {
+            if (!text || !text[0] || used + 2 >= n) return;
+            if (used)
+            {
+                out[used++] = '\n';
+                if (blankBefore && used + 1 < n) out[used++] = '\n';
+            }
+            const int w = snprintf(out + used, n - used, "%s", text);
+            if (w > 0) used += static_cast<size_t>(w);
+            if (used >= n) used = n - 1;
+            out[used] = 0;
+        };
+
+        char buf[512];
+        if (EffectsForTypeId(typeId, buf, sizeof(buf)))
+        {
+            const size_t nameLen = strlen(selfName);
+            const char* eff = buf;
+            if (nameLen && _strnicmp(buf, selfName, nameLen) == 0)
+            {
+                eff = buf + nameLen;
+                while (*eff == ' ' || *eff == ':') ++eff;   // "Name: ..." and "Name ("
+                if (!*eff) eff = buf;                       // name only - keep it
+            }
+            line(eff, false);
+            if (effectLen) *effectLen = used;   // everything written so far IS the effect
+        }
+        if (SlotsForTypeId(typeId, buf, sizeof(buf)))   line(buf, false);
+
+        // The prose, but only when it says something about THIS gear.
+        //
+        // Every abyss gear opens with the same two sentences - "Grants a variety
+        // of effects when embedded in an equipment socket. Witches found in each
+        // region have the power to embed or remove Abyss gears." - and only what
+        // follows names the gear. TidyDesc keeps the part after the break, but a
+        // gear with no per-gear sentence has no break either, so the shared
+        // paragraph came through whole and filled three lines with nothing.
+        //
+        // The per-gear sentence always opens with the gear's own name, and the
+        // boilerplate never does, so that is the test. It reads the same in
+        // every language, which a match on the English text would not.
+        if (DescForTypeId(typeId, buf, sizeof(buf)))
+        {
+            const size_t nameLen = strlen(selfName);
+            if (nameLen && _strnicmp(buf, selfName, nameLen) == 0)
+                line(buf, true);
+        }
+        return out[0] != 0;
+    }
+
+    bool Inventory::SlotsForTypeId(uint16_t typeId, char* out, size_t n)
+    {
+        if (!out || n == 0) return false;
+        out[0] = 0;
+
+        uintptr_t def = 0;
+        if (!DefForRow(g_itemTableGlobal, typeId, &def)) return false;
+
+        // Gate on the item type exactly as the game's own tooltip does at
+        // 0x140DD5B52: _equipAbleHash means something else on ordinary
+        // equipment, so reading it for anything but an abyss gear would print a
+        // confident wrong answer.
+        uint8_t type = 0;
+        if (!Read8(def + kOff_ItemDef_ItemType, &type) || type != kItemType_AbyssGear)
+            return false;
+
+        uint32_t hash = 0;
+        if (!Read32(def + kOff_ItemDef_EquipHash, &hash) || hash == 0) return false;
+
+        const char* where = nullptr;
+        switch (hash)
+        {
+            case kEquipHash_AllArmor:            where = "Armor"; break;
+            case kEquipHash_AllArmorShield:      where = "Armor and Shields"; break;
+            case kEquipHash_AllShield:           where = "Shields"; break;
+            case kEquipHash_AllShieldHandFoot:   where = "Shields, Gloves and Footwear"; break;
+            case kEquipHash_AllWeapon:           where = "Weapons"; break;
+            case kEquipHash_AllWeaponHandFoot:   where = "Weapons, Gloves and Footwear"; break;
+            case kEquipHash_MeleeWeapon:         where = "Melee Weapons"; break;
+            case kEquipHash_MeleeWeaponShield:   where = "Melee Weapons and Shields"; break;
+            case kEquipHash_MeleeWeaponHandFoot: where = "Melee Weapons, Gloves and Footwear"; break;
+            case kEquipHash_RangeWeapon:         where = "Ranged Weapons"; break;
+            default: break;
+        }
+
+        // An unrecognised hash is a real category, resolved by the engine
+        // through a map it builds at runtime. Print the VALUE while that is
+        // still unsolved, bounded, so the next log says which hashes are
+        // actually in play instead of leaving us to guess at ten constants that
+        // turned out not to cover the catalogue.
+        if (where)
+        {
+            snprintf(out, n, "Equippable on %s", where);
+            return out[0] != 0;
+        }
+
+        // Not a compound category, so ask the inverted table - which is where
+        // every hash the live catalogue actually uses turned out to live.
+        if (!g_equipSlotsBuilt) BuildEquipSlotMap();
+        const auto it = g_equipSlotNames.find(hash);
+        if (it == g_equipSlotNames.end())
+        {
+            static int s_unknown = 0;
+            if (s_unknown < 16)
+            {
+                ++s_unknown;
+                LOG("inventory/gear: type %u equipAbleHash %08X in neither the "
+                    "categories nor the table.", typeId, hash);
+            }
+            // Say nothing rather than say nothing useful.
+            return false;
+        }
+        // Condense a long list.
+        //
+        // The inverted map joins every equip type that answers to the hash, and
+        // for a weapon gear that is twenty names - "Sword, Dagger, Greataxe,
+        // Axe, Longsword, Giant Longsword, Mace, Warhammer, Two-Handed Spear,
+        // ..." - five lines of panel that say one thing: it goes on weapons.
+        // The player needs to know whether it fits the piece in front of them,
+        // and the picker already answers that by hiding what does not fit. So
+        // name a few and count the rest.
+        {
+            const std::string& all = it->second;
+            size_t shown = 0, cut = 0, total = 1;
+            for (size_t i = 0; i + 1 < all.size(); ++i)
+                if (all[i] == ',' && all[i + 1] == ' ') ++total;
+
+            for (size_t i = 0; i + 1 < all.size(); ++i)
+                if (all[i] == ',' && all[i + 1] == ' ')
+                {
+                    if (++shown == kSlotNames_Shown) { cut = i; break; }
+                }
+
+            if (cut && total > kSlotNames_Shown)
+            {
+                snprintf(out, n, "Equippable on %.*s and %zu more",
+                         static_cast<int>(cut), all.c_str(), total - kSlotNames_Shown);
+                return out[0] != 0;
+            }
+        }
+
+        snprintf(out, n, "Equippable on %s", it->second.c_str());
+        return out[0] != 0;
+    }
+
+    bool Inventory::EffectsForTypeId(uint16_t typeId, char* out, size_t n)
+    {
+        if (!out || n == 0) return false;
+        out[0] = 0;
+
+        uintptr_t def = 0;
+        if (!DefForRow(g_itemTableGlobal, typeId, &def)) return false;
+
+        // Abyss gear goes through the buff chain; ordinary equipment through the
+        // passive-skill list below. An item has one or the other, never both.
+        {
+            size_t used = 0;
+            if (AppendBuffLines(typeId, def, out, n, used)) return true;
+            out[0] = 0;
+        }
+
+        if (!g_skillTableGlobal) return false;
+
+        uintptr_t data  = 0;
+        uint32_t  count = 0;
+        if (!ReadPtr(def + kOff_ItemDef_PassiveList, &data) || data < kMinPointer) return false;
+        if (!Read32(def + kOff_ItemDef_PassiveCount, &count) || count == 0) return false;
+        if (count > kPassive_MaxCount) count = kPassive_MaxCount;
+
+        size_t used = 0;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const uintptr_t rec = data + static_cast<uintptr_t>(i) * kPassiveRec_Stride;
+            uint16_t skillId = 0;
+            uint32_t level   = 0;
+            if (!Read16(rec + kOff_PassiveRec_SkillId, &skillId)) break;
+            if (skillId == kPassiveRec_NoSkill) continue;
+            Read32(rec + kOff_PassiveRec_Level, &level);
+
+            uintptr_t sdef = 0;
+            if (!DefForRow(g_skillTableGlobal, skillId, &sdef)) continue;
+
+            // _stringKey first: it is the structured engine key
+            // ("Skill_Passive_AttackUp_01"), which is exactly the shape
+            // Prettify turns into words. _devSkillName is free-form and only
+            // worth falling back to when the key is missing.
+            char key[96] = {};
+            if (!StringField(sdef + kOff_SkillDef_Key, key, sizeof(key)) || !key[0])
+                if (!StringField(sdef + kOff_SkillDef_DevName, key, sizeof(key)) || !key[0])
+                    continue;
+
+            char nm[128];
+            Prettify(key, nm, sizeof(nm));
+
+            const int w = snprintf(out + used, n - used, "%s%s Lv%u",
+                                   used ? ", " : "", nm, static_cast<unsigned>(level));
+            if (w <= 0) break;
+            used += static_cast<size_t>(w);
+            if (used >= n - 1) break; // filled the row; the rest would truncate
+        }
+        return out[0] != 0;
+    }
+
+    bool Inventory::DescForTypeId(uint16_t typeId, char* out, size_t n)
+    {
+        if (!out || n == 0) return false;
+        out[0] = 0;
+        uintptr_t def = 0;
+        if (!DefForRow(g_itemTableGlobal, typeId, &def)) return false;
+        // (StripMarkup below turns the engine's <br/> into a real break.)
+        // An item can define either, both, or neither. LocString returns true
+        // for a resolvable-but-empty entry, so the emptiness check is what
+        // actually picks between them.
+        if (LocString(def + kOff_ItemDef_Desc, out, n) && out[0]) { TidyDesc(out); return out[0] != 0; }
+        out[0] = 0;
+        if (!LocString(def + kOff_ItemDef_Desc2, out, n) || !out[0]) return false;
+        TidyDesc(out);
+        return out[0] != 0;
     }
 
     bool Inventory::IconForTypeId(uint16_t typeId, char* out, size_t n)
@@ -3208,6 +3901,10 @@ namespace trinity::game
             }
             const int64_t id = _InterlockedIncrement64(
                 reinterpret_cast<volatile int64_t*>(alloc + kOff_IdAlloc_Counter));
+            {
+                std::lock_guard<std::mutex> lk(g_spawnedMx);
+                g_spawnedIds.insert(id);
+            }
 
             // Server first (it is the authority), then the client mirror - the
             // client one is what makes it appear WITHOUT a reload: the reconcile
@@ -3647,6 +4344,63 @@ namespace trinity::game
     int Inventory::RepairAllCarried()
     {
         return 0;
+    }
+
+    int Inventory::RefineAllCarried(bool* persistedAll)
+    {
+        if (persistedAll) *persistedAll = true;
+
+        // Work from a fresh snapshot: the slot addresses below are read out of
+        // it, and a stale one points at wherever those items used to be.
+        Refresh();
+
+        const uintptr_t sh = ServerHolder();
+        int changed = 0;
+
+        for (Storage& store : g_storages)
+            for (Group& g : store.groups)
+                for (Item& it : g.items)
+                {
+                    if (it.slot < kMinPointer || it.typeId == kInvSlot_EmptyType) continue;
+
+                    // The item table decides what is refinable, not the category
+                    // name or the storage it sits in. An item with no enchant
+                    // list has nothing to resolve a level against, and writing
+                    // one anyway is what crashed the weapon switch - see
+                    // kOff_ItemVal_RefineLevel in offsets.h.
+                    uint16_t maxLvl = 0;
+                    if (!MaxRefineForType(it.typeId, &maxLvl) || maxLvl == 0) continue;
+
+                    // Confirm the slot still holds what the snapshot says.
+                    // Refresh() above is rate-limited and can legitimately
+                    // decline, so these addresses may describe where an item
+                    // USED to be. The server write is already guarded this way
+                    // inside SlotByPos; without the same check here the client
+                    // write is the one that refines the wrong item.
+                    uint16_t live = 0;
+                    if (!Read16(it.slot + kOff_InvSlot_TypeId, &live) || live != it.typeId)
+                        continue;
+
+                    uint16_t cur = 0;
+                    if (!Read16(it.slot + kOff_ItemVal_RefineLevel, &cur)) continue;
+                    if (cur >= maxLvl) continue;
+
+                    if (!Write16(it.slot + kOff_ItemVal_RefineLevel, maxLvl)) continue;
+                    ++changed;
+
+                    // ...and the server authority, or the next reconcile reverts
+                    // it. The two holders are position-perfect mirrors, so the
+                    // same (bucket, slot) lands on the same physical item;
+                    // SlotByPos re-checks the typeId before handing the address
+                    // back, so a drifted position writes nothing rather than
+                    // refining the wrong item.
+                    const uintptr_t ss = SlotByPos(sh, it.bucketIdx, it.slotIdx, it.typeId);
+                    if (!ss || !Write16(ss + kOff_ItemVal_RefineLevel, maxLvl))
+                        if (persistedAll) *persistedAll = false;
+                }
+
+        if (changed) ForceRefresh(); // the list still shows the old levels
+        return changed;
     }
 
     bool Inventory::IsSpecialCategory(int cat)

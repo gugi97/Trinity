@@ -247,6 +247,14 @@ namespace trinity::game
         // Sets every carried item's endurance to its own maximum. Returns how
         // many were actually below it; items without durability are untouched.
         static int  RepairAllCarried();
+        // Refines every carried item to its own maximum, the whole-inventory
+        // twin of Equipment::RefineAllMax (which only reaches what is worn).
+        // Returns how many were actually raised; MaxRefineForType decides what
+        // counts - anything with no refinement data is skipped, which is what
+        // keeps this off fists, cosmetics and tools. `persistedAll` (optional)
+        // reports whether every write also reached the server realm; false
+        // means some of it is session-only and the caller should say so.
+        static int  RefineAllCarried(bool* persistedAll = nullptr);
         static bool CatalogReady();
 
         // True once the server-authority holder is known. Normally true within
@@ -331,6 +339,42 @@ namespace trinity::game
         // icon sprite name for an arbitrary typeId - the same lookups the
         // browser rows use, for items dye.cpp reads off the equip component.
         static bool NameForTypeId(uint16_t typeId, char* out, size_t n);
+        // The item's own tooltip text, in the player's language. False when the
+        // item defines none - most consumables and materials do, most equipment
+        // does. Tries _itemDesc, then _itemDesc2.
+        static bool DescForTypeId(uint16_t typeId, char* out, size_t n);
+        // What the item DOES when worn or socketed, as "Name Lv3, Name Lv1",
+        // built from its _equipPassiveSkillList. False when the item grants
+        // nothing, or when the Skill table did not resolve. The names are the
+        // engine's developer strings: SkillInfo carries no localised name at
+        // all (see kStr_SkillTable), so this identifies each effect rather than
+        // reproducing the game's own tooltip wording.
+        static bool EffectsForTypeId(uint16_t typeId, char* out, size_t n);
+        // Which equipment an abyss gear can be socketed into ("Equippable on
+        // Armor"). False for anything that is not an abyss gear, and for a gear
+        // whose category the engine only resolves through a runtime-built map -
+        // see kOff_ItemDef_EquipHash. Never guesses.
+        static bool SlotsForTypeId(uint16_t typeId, char* out, size_t n);
+        // Whether an abyss gear can go in a socket on the given piece. Fails
+        // OPEN: anything it cannot resolve is allowed through, because hiding a
+        // gear that does fit is worse than listing one that does not.
+        static bool GearFitsSlot(uint16_t gearTypeId, uint16_t pieceTypeId);
+        // True for an item Add Item created this session. Such an item has no
+        // record in the real server database, so an engine reconcile rebuilds
+        // it and its socket edits do not survive - see g_spawnedIds. False for
+        // anything bought, looted, or spawned in an earlier session, which the
+        // mod has no way to recognise.
+        static bool IsModSpawned(int64_t instanceId);
+        // The whole description block for one gear row: what it does, where it
+        // fits, a blank line, then the prose. Any part may be missing.
+        //
+        // `effectLen` (optional) reports how many leading characters are the
+        // EFFECT line, or 0 when the gear has none. The caller needs that to
+        // put the effect on the row label without re-walking the buff chain -
+        // and without mistaking the slot line for an effect on a gear that has
+        // no effect, which reads as "Aegis I [Equippable on Melee Weapons]".
+        static bool GearRowText(uint16_t typeId, char* out, size_t n,
+                                size_t* effectLen = nullptr);
         static bool IconForTypeId(uint16_t typeId, char* out, size_t n);
 
         // The live player CHARACTER of each realm (0 while unresolved), and the

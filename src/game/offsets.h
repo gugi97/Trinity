@@ -520,9 +520,47 @@ namespace trinity::game
     // resolver, and compares desc+0x28 (nodeCount) against its third argument
     // before travelling, which is exactly the documented contract. The frame
     // immediates are wildcarded; the arg shuffle and the sceneId test are not.
+    // TU 2.03.00 recompiled the prologue AGAIN and, more importantly, gave the
+    // function a FOURTH argument. The 2850 shape is gone; the 2944 one is:
+    //     48 89 5C 24 18   mov [rsp+0x18], rbx
+    //     89 54 24 10      mov [rsp+0x10], edx     ; sceneId spilled
+    //     48 89 4C 24 08   mov [rsp+0x08], rcx     ; the unused first arg
+    //     55 56 57 41 56 41 57   push rbp,rsi,rdi,r14,r15
+    //     48 8D AC 24 ..   lea rbp, [rsp-0x1B0]
+    //     48 81 EC ..      sub rsp, 0x2B0
+    //     41 8B F9         mov edi, r9d            ; THE NEW 4th ARGUMENT
+    //     45 8B F8         mov r15d, r8d           ; nodeIndex
+    //     33 DB            xor ebx, ebx
+    //     45 85 C9         test r9d, r9d           ; and it branches on it
+    //
+    // The first argument is still unused: rcx is spilled and then immediately
+    // overwritten from a global at 0x1406550F0's `mov rcx, [rip+0x6714083]`,
+    // which is the travel manager. Passing nullptr stays correct.
+    //
+    // The fourth argument is a MODE, and it must be 0 for node travel. That is
+    // not inferred - it is read off the game's own three call sites:
+    //     0x140D9E855  xor r9d, r9d   ; sceneId/nodeIndex from +0x960/+0x964
+    //     0x140DBC7BA  xor r9d, r9d   ; same shape
+    //     0x140DBC7D4  mov r9d, [rbx+0x968] ; the OTHER mode, with edx = r8d = -1
+    // and the function opens `test r9d,r9d; je 0x1406553AC`, so the node path
+    // lives behind that jump. A three-argument call leaves whatever happened to
+    // be in r9, which takes the wrong branch - the reason a stale prototype is
+    // worse than a missing signature.
+    //
+    // Anchored through the argument shuffle and that r9 gate rather than on the
+    // frame alone; the frame immediates are wildcarded because they are the
+    // compiler's to choose, which is how this signature died twice already.
+    //
+    // Verified: one match in 2944, at 0x1406550B0 - and live-tested in-game on
+    // 2944, which is the part that matters. A resolving signature only proves
+    // the bytes are there; travelling proves mode 0 was the right read of those
+    // three call sites.
     inline constexpr const char* kSig_TravelToNode =
-        "48 89 5C 24 ?? 48 89 74 24 ?? 89 54 24 ?? 48 89 4C 24 ?? 55 "
-        "57 41 56 48 8D 6C 24 ??";
+        "48 89 5C 24 ?? 89 54 24 ?? 48 89 4C 24 ?? 55 56 57 41 56 41 57 "
+        "48 8D AC 24 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 41 8B F9 45 8B F8 "
+        "33 DB 45 85 C9";
+    // The mode the node-travel path needs. See the call sites above.
+    inline constexpr unsigned int kTravelMode_Node = 0;
 
     // --- Destination map marker update ---------------------------------------
     // kSig_DestinationUpdate is GONE, deliberately. In 2760 it matched
@@ -1043,8 +1081,17 @@ namespace trinity::game
     // anything - but a signature that needs a later guard to notice it matched
     // the wrong function is already wrong. Carrying the stride inside the
     // pattern makes the two impossible to confuse. Verified: one match in 2850.
+    // TU 2.03.00 (2944) kept this function byte-for-byte except for two
+    // branch displacements: the `je` after the null check went 0x57 -> 0x5E
+    // because the cleanup path past it changed length. The old pattern
+    // baked that 0x57 in and so matched nothing, while the function itself
+    // had not moved semantically at all - same prologue, same stride, same
+    // destructor call at the same offset. A jump displacement is the
+    // compiler's to choose; it belongs in a wildcard next to the frame
+    // immediates, never in the literal bytes. Verified: one match in 2944,
+    // at 0x1489FF210, and the 0xF0 sibling at 0x14924F490 does not match.
     inline constexpr const char* kSig_InvFreePlacements =
-        "48 89 5C 24 ?? 57 48 83 EC 20 48 89 CB 48 83 39 00 74 57 31 "
+        "48 89 5C 24 ?? 57 48 83 EC 20 48 89 CB 48 83 39 00 74 ?? 31 "
         "FF 39 79 08 76 ?? 66 0F 1F 44 00 00 89 F8 48 69 C8 E0 00 00 00";
     // Byte offset of that `imul` immediate inside the match. We re-read it at
     // load and refuse Add Item unless it agrees with kPlacement_Stride - the
@@ -1199,8 +1246,220 @@ namespace trinity::game
     //
     // ItemInfo fields we consume (offsets into the def resolved above):
     inline constexpr uintptr_t kOff_ItemDef_Name   = 0x20;  // _itemName (loc-string struct)
+    // _itemDesc / _itemDesc2 - the tooltip text the game itself shows for an
+    // item, in the player's language, already formatted. Same 32-byte
+    // loc-string shape as _itemName, so Inventory::LocString reads them as-is.
+    //
+    // The STRUCT is at +0xB0, not +0xA8. The deserializer does
+    //     lea rdx, [rsi + 0xb0]        ; <- the struct being read
+    //     mov word ptr [rsi + 0xa8], ax ; <- a separate u16
+    //     call 0x141232640              ; the loc-string reader
+    // guarded by the assert string "ItemInfo의 _itemDesc를 ...". Calibrated
+    // against _itemName above, whose own site is `lea rdx,[rsi+0x20]` into the
+    // same reader - the offset that matters is the one in the LEA. A first
+    // reading of this put _itemDesc at +0xA8 and would have handed LocString a
+    // u16, which reads back as empty rather than as an error.
+    inline constexpr uintptr_t kOff_ItemDef_Desc   = 0xB0;  // _itemDesc
+    inline constexpr uintptr_t kOff_ItemDef_Desc2  = 0xD0;  // _itemDesc2
+
+    // _equipPassiveSkillList - what an item actually DOES when worn or socketed.
+    //
+    // This, not _itemDesc, is where an abyss gear's effect lives. _itemDesc is
+    // lore prose: the game's own socket tooltip (0x140DD2940) never reads it,
+    // while it does read this list at 0x140DD3272/0x140DD3279, and the main
+    // item tooltip draws the two as separate blocks with neither derived from
+    // the other (prose at 0x140EBB09A, stat lines from the list). A first pass
+    // at this feature planned to show _itemDesc and would have shown the player
+    // flavour text where they asked for numbers.
+    //
+    // Vector shape, like every other list in this struct: data pointer, then a
+    // u32 count. Each entry is 8 bytes, built by the deserializer at
+    // 0x14148F7E0 which seeds the id to 0xFFFF and the level to 0, then packs
+    // both into one qword.
+    inline constexpr uintptr_t kOff_ItemDef_PassiveList  = 0x100; // -> entry[]
+    inline constexpr uintptr_t kOff_ItemDef_PassiveCount = 0x108; // u32
+    inline constexpr uintptr_t kPassiveRec_Stride        = 8;
+    inline constexpr uintptr_t kOff_PassiveRec_SkillId   = 0x00;  // u16, row in "Skill"
+    inline constexpr uintptr_t kOff_PassiveRec_Level     = 0x04;  // u32, 1-based tier
+    inline constexpr uint16_t  kPassiveRec_NoSkill       = 0xFFFF;
+    // Sanity bound before walking - a wrong pointer should cost nothing.
+    inline constexpr uint32_t  kPassive_MaxCount         = 64;
+
+    // The "Skill" table, which turns a passive entry's id into something
+    // printable. Reached the INDIRECT way (`mov r8, cs:<slot>` at 0x1403823A2,
+    // the slot holding the char*), unlike iteminfo's `lea r8, <str>` - so it
+    // needs FindTableGlobal's indirect form. The name is compared with
+    // _stricmp, so this does not collide with "SkillGroup".
+    //
+    // SkillInfo carries NO localised name. All 36 of its fields were checked
+    // against the loc-string reader at 0x141232640 and not one goes through it;
+    // the only printable fields are developer strings. Player-facing effect
+    // text is generated at runtime through _buffLevelList ->
+    // patterndescriptioninfo -> stringinfo with template interpolation, which
+    // is three more tables than this feature is worth. So Trinity shows the
+    // developer name and the level, which names the effect honestly without
+    // pretending to be the game's own tooltip.
+    // _stringKey is the structured one ("Skill_Passive_AttackUp_01"), so it is
+    // read first and run through Prettify; _devSkillName is free-form and only
+    // a fallback.
+    inline constexpr const char* kStr_SkillTable       = "Skill";
+    inline constexpr uintptr_t   kOff_SkillDef_Key     = 0x08;  // _stringKey (string obj)
+    inline constexpr uintptr_t   kOff_SkillDef_DevName = 0x118; // _devSkillName (string obj)
+
+    // --- What an abyss gear actually does -------------------------------------
+    // The numeric line the game shows on its Embed Abyss Gear screen
+    // ("+4.0% damage to beasts", "+35% Turning Slash Damage").
+    //
+    // Two earlier guesses at the source were wrong and are recorded so they are
+    // not tried again:
+    //   * _equipPassiveSkillList (+0x100) is what the tooltip reads for ORDINARY
+    //     equipment. Abyss gears leave it empty - confirmed in-game, with the
+    //     Skill table resolving correctly and the list still yielding nothing.
+    //   * _itemEffectInfo (+0x3BE) indexes "effectinfo", whose rows are particle
+    //     spawns, mesh attachments and sound events. No magnitudes, no stats.
+    //
+    // The real chain, every step read off the socket tooltip at 0x140DD3600:
+    //
+    //   ItemInfo +0x248 _enchantDataList (stride 0x70, count +0x250)
+    //     entry +0x58 _equipBuffs (8-byte keys), count +0x60
+    //       -> "buffinfo" row
+    //          +0x18 _buffDataList (stride 0x10), count +0x20
+    //            element +0x00 level, +0x08 -> descriptor
+    //              descriptor +0x38 pattern key (0xFFFF = none)
+    //                -> "patterndescriptioninfo" row +0x40 string key
+    //                  -> "stringinfo" row +0x18 = the template text
+    //
+    // The template carries a placeholder; the number that fills it is not a
+    // field anywhere - it is computed by FormatBuffValue (kSig_FormatBuffValue).
+    inline constexpr uintptr_t kOff_EnchantRec_EquipBuffs = 0x58; // -> key[]
+    inline constexpr uintptr_t kOff_EnchantRec_BuffCount  = 0x60; // u32
+    inline constexpr uintptr_t kBuffKey_Stride            = 8;
+    // An _equipBuffs entry is the same 8-byte shape as a passive-skill entry:
+    // the row id, then the LEVEL. Reading only the id made every tier of a gear
+    // print tier I's number - Aegis I, II and III all resolve to buffRow 154,
+    // whose _buffDataList holds 30 levels, and element 0 was taken for all
+    // three. The tier is the index, not a different row.
+    inline constexpr uintptr_t kOff_BuffKey_Row          = 0x00; // u16
+    inline constexpr uintptr_t kOff_BuffKey_Level        = 0x04; // u32
+    inline constexpr uint32_t  kBuff_MaxCount             = 32;   // sanity bound
+
+    inline constexpr const char* kStr_BuffInfoTable    = "buffinfo";
+    inline constexpr const char* kStr_PatternDescTable = "patterndescriptioninfo";
+    // Both are the DIRECT form (a lea of r8 from the string), unlike "Skill".
+    inline constexpr uintptr_t kOff_BuffDef_DataList = 0x18; // -> BuffData[]
+    inline constexpr uintptr_t kOff_BuffDef_DataCnt  = 0x20; // u32, read at 0x140DD36F6
+    inline constexpr uintptr_t kOff_BuffDef_FormatArg = 0x2C; // u32, 5th arg to the formatter
+    inline constexpr uintptr_t kBuffData_Stride      = 0x10; // `shl rdx, 4` at 0x140DD36FD
+    inline constexpr uintptr_t kOff_BuffData_Level   = 0x00; // u32
+    inline constexpr uintptr_t kOff_BuffData_Desc    = 0x08; // -> descriptor
+    inline constexpr uintptr_t kOff_BuffDesc_Pattern = 0x38; // u16 key, 0xFFFF = none
+    inline constexpr uint16_t  kPattern_None         = 0xFFFF;
+    inline constexpr uintptr_t kOff_PatternDef_StrKey = 0x40; // u16 -> stringinfo row
+
+    // The engine's own stat-line formatter, and the only part of the abyss-gear
+    // chain that is not a plain read.
+    //
+    // The magnitude is NOT a field. One descriptor class keeps it at +0x98 and
+    // prints it with "%d" after dividing by 1000 (0x141E82990), but that is one
+    // class of several - the percentage lines with a decimal come from another.
+    // Reading +0x98 across all of them would put wrong numbers on some gears,
+    // which is worse than putting none, so Trinity calls the formatter that
+    // knows every class instead.
+    //
+    // Eight arguments, all read off the game's own call site at 0x140DD3740:
+    //   rcx       descriptor          (BuffData + 0x08)
+    //   rdx       u32* status out     (0 = ok)
+    //   r8b       mode                4 = the static equipment tooltip line
+    //   r9d       level               (BuffData + 0x00)
+    //   [rsp+20]  u32 count           (BuffInfo + 0x2C; unused in mode 4)
+    //   [rsp+28]  pa::String* out     THE TEXT
+    //   [rsp+30]  u32* styling out
+    //   [rsp+38]  const u8* context   points at 6 = equipment socket
+    //
+    // It guards its own sentinel (0x141E7EB93 early-outs when the pattern key is
+    // 0xFFFF), writes only through those out pointers, takes no lock and mutates
+    // no game state - so it is safe to call from the menu while the game runs.
+    // Verified: one match in 2850, at 0x141E7EB60.
+    inline constexpr const char* kSig_FormatBuffValue =
+        "48 89 5C 24 10 44 89 4C 24 20 55 56 57 41 54 41 55 41 56 41 57 "
+        "48 8D AC 24 30 FD FF FF";
+    // What the formatter is handed for the two constants the call site fixes.
+    inline constexpr uint8_t kBuffFmt_Mode    = 4; // static equipment tooltip
+    inline constexpr uint8_t kBuffFmt_Context = 6; // equipment socket buff
+    // pa::String, the out-text object: an inline buffer, then a heap pointer
+    // that stays null while the text fits, then capacity and length.
+    inline constexpr size_t    kPaString_Size     = 280;
+    inline constexpr uintptr_t kOff_PaStr_Heap    = 0x108;
+    inline constexpr uintptr_t kOff_PaStr_Cap     = 0x110;
+    inline constexpr uintptr_t kOff_PaStr_Len     = 0x114;
+    inline constexpr uint32_t  kPaStr_Capacity    = 0x105;
     inline constexpr uintptr_t kOff_ItemDef_Groups = 0x350; // _itemGroupInfoList (vector)
     inline constexpr uintptr_t kOff_ItemDef_Tier   = 0x210; // u8 _itemTier (rarity 0..5)
+    inline constexpr uintptr_t kOff_ItemDef_ItemType = 0xA3; // u8 _itemType
+    inline constexpr uint8_t   kItemType_AbyssGear  = 0x4A; // 74
+
+    // Which equipment an abyss gear may be socketed into.
+    //
+    // _equipAbleHash is a u32 - the game reads it as `cmp dword ptr [rax+0x68], 0`
+    // at 0x140DD5B67 - holding a Jenkins lookup3 hash of a category name. The
+    // tooltip builder at 0x140DD5A50 gates on _itemType == 74 first, then
+    // compares this field against ten constants the engine hashes at startup.
+    //
+    // The ten below were checked by hashing the same strings independently and
+    // matching all ten, so this table stands on the algorithm rather than on a
+    // reading of the initialiser. A hash that is none of these is resolved by
+    // the game through an inverted map built at runtime from "equiptypeinfo" -
+    // not static data, and not worth the machinery here, so Trinity says
+    // "specific slots" for those rather than guessing.
+    //
+    // Checked against the reference VTweak build too: it does NOT do this. It
+    // matches on item-name substrings instead, which is the brittle approach
+    // this replaces.
+    inline constexpr uint32_t kEquipHash_AllArmor           = 0x94614806;
+    inline constexpr uint32_t kEquipHash_AllArmorShield     = 0xFC2012AC;
+    inline constexpr uint32_t kEquipHash_AllShield          = 0x22049F80;
+    inline constexpr uint32_t kEquipHash_AllShieldHandFoot  = 0x46C73A32;
+    inline constexpr uint32_t kEquipHash_AllWeapon          = 0x78ADEC1C;
+    inline constexpr uint32_t kEquipHash_AllWeaponHandFoot  = 0xBF9BB325;
+    inline constexpr uint32_t kEquipHash_MeleeWeapon        = 0xB373DE70;
+    inline constexpr uint32_t kEquipHash_MeleeWeaponShield  = 0xAE5D49A1;
+    inline constexpr uint32_t kEquipHash_MeleeWeaponHandFoot= 0x5ECAA021;
+    inline constexpr uint32_t kEquipHash_RangeWeapon        = 0x4CB7C06E;
+    inline constexpr uintptr_t kOff_ItemDef_EquipHash       = 0x68; // u32
+
+    // Where the ten constants above run out.
+    //
+    // A live run logged every hash the picker could not map, and sixteen abyss
+    // gears produced four values - B1DDF576, C9148DCC, BB5411B9, A8436D01 - none
+    // of them among the ten. 127551 candidate strings built from slot vocabulary
+    // were hashed against the verified lookup3 and matched none, so these are
+    // specific equip-type keys rather than compound category names and there is
+    // nothing to guess.
+    //
+    // The game resolves them by inverting "equiptypeinfo": every row lists the
+    // hashes it answers to, and carries its own localised name. Trinity builds
+    // the same map, which needs no hardcoded hash at all and follows the
+    // player's language for free. The ten stay as the first lookup because the
+    // compound categories are NOT rows in this table - the engine compares them
+    // before consulting the map, and so does Trinity.
+    //
+    // Derived here rather than taken on trust: the assert strings in the
+    // EquipTypeInfo deserializer place _equipAbleHashList at +0x48 and
+    // _equipTypeName at +0x58, and the name goes through the same loc-string
+    // reader (0x141232640) as an item name - so LocString reads it directly,
+    // with no virtual call. The list deserializer at 0x14148E360 reads each
+    // element with `mov r8d, 4`, and keeps count at vector+8, capacity at +0xC.
+    inline constexpr uintptr_t kOff_ItemDef_EquipTypeInfo = 0x42; // u16 equiptypeinfo row
+    inline constexpr uint16_t  kEquipType_None            = 0xFFFF;
+    inline constexpr const char* kStr_EquipTypeTable  = "equiptypeinfo";
+    inline constexpr uintptr_t kOff_EquipType_HashList = 0x48; // -> u32[]
+    inline constexpr uintptr_t kOff_EquipType_HashCnt  = 0x50; // u32
+    inline constexpr uintptr_t kOff_EquipType_Name     = 0x58; // loc-string struct
+    inline constexpr uint32_t  kEquipType_MaxHashes    = 64;   // sanity bound
+    // How many slot names a row prints before it starts counting instead.
+    // Four fits one line; a weapon gear answers to twenty equip types and the
+    // full list told the player nothing the picker's own filtering had not.
+    inline constexpr size_t    kSlotNames_Shown       = 4;
     // _maxStackCount / _applyMaxStackCap: the per-item stack cap. Most rows
     // already carry 999999 (an effectively-unlimited default) - the cap that
     // actually bites for outliers (equipment, key items, some consumables) is
@@ -1849,12 +2108,20 @@ namespace trinity::game
     // in the value copier sub_F4DAD00). Because sub_F4DAD00 copies +0x0A, the
     // level rides with the item value on save, so - exactly like dye/sockets - a
     // write mirrored into BOTH realms persists (a client-only write is undone by
-    // the server->client reconcile, which zeroes a client +0x0A). Two things stay
-    // live-verify-only, so treat them as unconfirmed until tested in-game:
+    // the server->client reconcile, which zeroes a client +0x0A).
+    //
+    // The second of these was open for a long time and is now SETTLED, on build
+    // 2850: a whole-inventory refine (Inventory::RefineAllCarried, which writes
+    // the client slot and mirrors into the server holder via SlotByPos) was run
+    // in-game, the save reloaded, and the levels were still there. So the server
+    // does accept an out-of-band level and keeps it across a save. The dual-realm
+    // write is what earns that; a client-only write would not survive.
+    //
+    // One thing stays live-verify-only, so treat it as unconfirmed:
     //   * whether bumping +0x0A alone re-derives the piece's stats (real
     //     refinement also rebuilds derived data and spins a new item instance);
     //     we trigger the same effect refresh a socket edit does as the best lever.
-    //   * whether the server accepts an out-of-band level on reconcile/save.
+    //     The level persisting is not evidence the stats followed it.
     inline constexpr uintptr_t kOff_ItemVal_RefineLevel = 0x0A; // u16, == kOff_ItemVal_Subtype
     inline constexpr int       kRefine_Max              = 10;
 

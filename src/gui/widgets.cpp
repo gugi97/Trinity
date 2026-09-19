@@ -67,7 +67,16 @@ namespace trinity::ui
         if (i == ms.selected && itemIcon && itemIcon[0])
         {
             snprintf(g_previewSprite, sizeof(g_previewSprite), "%s", itemIcon);
-            snprintf(g_previewLabel,  sizeof(g_previewLabel),  "%s", label ? label : "");
+            // The preview card is a narrow box under the artwork, so it gets the
+            // NAME only. A row may carry a trailing "  [detail]" - the abyss
+            // gear picker puts each gear's effect there - and pushing that into
+            // the card wraps it to two lines and clips the second.
+            {
+                const char* l = label ? label : "";
+                const char* cut = strstr(l, "  [");
+                const int   n = cut ? static_cast<int>(cut - l) : static_cast<int>(strlen(l));
+                snprintf(g_previewLabel, sizeof(g_previewLabel), "%.*s", n, l);
+            }
         }
 
         const bool visible = i >= ms.scroll && i < ms.scroll + kMaxVisible;

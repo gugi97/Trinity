@@ -543,6 +543,20 @@ namespace trinity::gui
             // stays out of the menu. Equipment::RepairAllWorn and
             // Inventory::RepairAllCarried are kept and still correct.
 
+            if (ui::Option("Max Refine All (Inventory)",
+                           "Refines every refinable item you are CARRYING to its own "
+                           "maximum, not just what you have equipped. Items the game "
+                           "does not refine are left alone."))
+            {
+                bool all = false;
+                const int k = game::Inventory::RefineAllCarried(&all);
+                snprintf(s_eqBatchMsg, sizeof(s_eqBatchMsg),
+                         k == 0 ? "Nothing in your bags to refine."
+                                : (all ? "Refined %d carried item(s)."
+                                       : "Refined %d carried item(s) - some are this session only."),
+                         k);
+            }
+
             if (ui::Option("Unlock All Sockets",
                            "Opens all five sockets on every worn piece."))
             {
@@ -606,6 +620,27 @@ namespace trinity::gui
             ui::End();
             return;
         }
+
+        // Say it before the player spends effort on edits that will not last.
+        //
+        // An item Add Item created exists on this client and nowhere else. The
+        // real server database has no record of it, so when the engine
+        // reconciles the container it rebuilds the item from a fetch result
+        // that says nothing about it, and the sockets come back as constructed.
+        // That is the standing "reverts to its original abyss gear" report, and
+        // it is why a vendor-bought piece keeps its edits and this one does not.
+        //
+        // Trinity cannot fix it from the client. It can recognise the item,
+        // because it issued the instance id itself - so the row says so rather
+        // than letting the mod promise an edit it cannot keep.
+        if (game::Inventory::IsModSpawned(si.instanceId))
+            ui::Option("! Added by Add Item - edits may not stick",
+                       "This piece was spawned by the mod, so the game has no "
+                       "server-side record of it. Socket and refinement edits "
+                       "apply now, but the next time the game reconciles your "
+                       "inventory it can rebuild the piece and put its original "
+                       "abyss gear back. A piece bought from a vendor is not "
+                       "affected.");
 
         if (si.unlockedCount < game::Equipment::kMaxSockets)
         {
@@ -712,6 +747,15 @@ namespace trinity::gui
             return;
         }
 
+        // The piece being socketed, so the list below can be narrowed to what
+        // fits it. A piece that no longer resolves leaves pieceType at 0xFFFF,
+        // which GearFitsSlot treats as "do not filter".
+        uint16_t pieceType = 0xFFFF;
+        {
+            game::Equipment::SlotInfo si{};
+            if (EqSlotForTag(s_eqTag, &si)) pieceType = si.typeId;
+        }
+
         const int total = game::Equipment::GearCount();
         if (total == 0)
         {
@@ -731,9 +775,37 @@ namespace trinity::gui
             const char* icon = nullptr;
             if (!game::Equipment::GetGear(i, &tid, &name, &icon)) continue;
             if (s_eqFind[0] && !ContainsNoCase(name, s_eqFind)) continue;
+            // Only what actually fits this piece. The engine keeps the list of
+            // gears each equipment type accepts, so this is the game's own
+            // answer rather than a rule Trinity invented - and it fails open,
+            // listing everything whenever it cannot resolve the piece.
+            if (!game::Inventory::GearFitsSlot(tid, pieceType)) continue;
             ++shown;
 
-            if (ui::OptionItem(name, (icon && icon[0]) ? icon : nullptr, "Socket this abyss gear."))
+            // What it does, where it fits, then the prose - assembled in one
+            // call so this loop holds no string arithmetic of its own.
+            char gdesc[640];
+            size_t effLen = 0;
+            const char* rowDesc =
+                game::Inventory::GearRowText(tid, gdesc, sizeof(gdesc), &effLen)
+                    ? gdesc : "Socket this abyss gear.";
+
+            // Put the effect on the ROW as well as in the panel below it: the
+            // panel only describes the highlighted row, so comparing four gears
+            // meant moving the cursor four times. effLen is the effect's own
+            // length, so a gear with no effect keeps a bare name rather than
+            // borrowing the slot line.
+            char label[192];
+            {
+                const size_t nameLen = strlen(name);
+                if (effLen && nameLen + effLen + 6 < sizeof(label))
+                    snprintf(label, sizeof(label), "%s  [%.*s]", name,
+                             static_cast<int>(effLen), gdesc);
+                else
+                    snprintf(label, sizeof(label), "%s", name);
+            }
+
+            if (ui::OptionItem(label, (icon && icon[0]) ? icon : nullptr, rowDesc))
             {
                 bool p = false;
                 if (game::Equipment::AddGear(s_eqTag, s_eqSocket, tid, &p))
