@@ -359,6 +359,14 @@ namespace trinity::game
         // OPEN: anything it cannot resolve is allowed through, because hiding a
         // gear that does fit is worse than listing one that does not.
         static bool GearFitsSlot(uint16_t gearTypeId, uint16_t pieceTypeId);
+        // True when the engine's own _itemType says this row is an abyss
+        // gear. Used to pick the gear catalog by CONTENT - its category
+        // name is localised, so matching on the word "gear" only works
+        // in English.
+        static bool IsAbyssGearType(uint16_t typeId);
+        // Second content signal for the same job: a socketable gear carries
+        // enchant rows, a refinement material carries none.
+        static bool HasEnchantData(uint16_t typeId);
         // True for an item Add Item created this session. Such an item has no
         // record in the real server database, so an engine reconcile rebuilds
         // it and its socket edits do not survive - see g_spawnedIds. False for

@@ -214,21 +214,97 @@ namespace trinity::game
             for (; s && s[i] && i + 1 < n; ++i) out[i] = static_cast<char>(tolower(static_cast<unsigned char>(s[i])));
             out[i] = 0;
         }
+        // Which catalog category holds the abyss gears.
+        //
+        // This used to match the category NAME: "abyss", then "gear". Category
+        // names are LOCALISED, and players also run third-party translation
+        // mods, so the name is not ours to predict. On an Indonesian client the
+        // category reads "Perlengkapan Abyss" - it contains "abyss" but not
+        // "gear", so the search fell through to "any category whose name
+        // contains abyss", which is the Sealed Abyss Artifact materials. The
+        // picker then listed 150 refinement materials and not one gear, and
+        // every filter downstream correctly rejected all of them.
+        //
+        // Pick by CONTENT. Two signals, both language-independent:
+        //   1. _itemType == kItemType_AbyssGear - the same byte the game's own
+        //      socket tooltip gates on.
+        //   2. a non-empty _enchantDataList - a socketable gear carries enchant
+        //      rows, a refinement material carries none.
+        // Signal 2 only runs if signal 1 finds nothing, so a future offset drift
+        // in one of them cannot silently empty the picker.
+        //
+        // The loose name fallback is GONE. It is the thing that produced a
+        // confidently wrong list, and a wrong list is worse than an empty one -
+        // the menu already says "the Abyss Gear catalog did not resolve".
         int GearCategory()
         {
             if (g_gearCat != -2) return g_gearCat;
             const int n = Inventory::CatalogCategoryCount(); // builds the catalog
-            int abyssAny = -1;
+            if (n <= 0) return -1;                           // not ready: retry later
+
+            // Sample rather than walk: a category is either gears or it is not,
+            // and a few rows settle it without touching every item.
+            auto score = [](int c, bool byType, int* seenOut) -> int
+            {
+                const int items = Inventory::CatalogItemCount(c);
+                if (items <= 0) { *seenOut = 0; return 0; }
+                const int step = (items > 32) ? (items / 32) : 1;
+                int hits = 0, seen = 0;
+                for (int i = 0; i < items && seen < 32; i += step, ++seen)
+                {
+                    Inventory::ItemInfo info{};
+                    if (!Inventory::GetCatalogItem(c, i, &info)) continue;
+                    if (byType ? Inventory::IsAbyssGearType(info.typeId)
+                               : Inventory::HasEnchantData(info.typeId))
+                        ++hits;
+                }
+                *seenOut = seen;
+                return hits;
+            };
+
+            for (int pass = 0; pass < 2; ++pass)
+            {
+                const bool byType = (pass == 0);
+                int best = -1, bestHits = 0, bestSeen = 0;
+                for (int c = 0; c < n; ++c)
+                {
+                    int seen = 0;
+                    const int hits = score(c, byType, &seen);
+                    if (hits > bestHits) { bestHits = hits; bestSeen = seen; best = c; }
+                }
+                // Demand a clear majority. A stray hit or two is noise, not a
+                // category of gears.
+                if (best >= 0 && bestSeen > 0 && bestHits * 2 > bestSeen)
+                {
+                    g_gearCat = best;
+                    LOG("equipment: gear catalog = category %d '%s' (%d of %d sampled rows "
+                        "matched by %s)", best, Inventory::CatalogCategoryName(best),
+                        bestHits, bestSeen, byType ? "item type" : "enchant data");
+                    return g_gearCat;
+                }
+            }
+
+            // Strict English name match, last resort only. Never the loose
+            // "any abyss category" rule that caused this bug.
             for (int c = 0; c < n; ++c)
             {
                 char low[96];
                 LowerCopy(Inventory::CatalogCategoryName(c), low, sizeof(low));
-                if (!strstr(low, "abyss")) continue;
-                if (strstr(low, "gear")) { g_gearCat = c; return c; } // prefer "Abyss Gear"
-                if (abyssAny < 0) abyssAny = c;                       // else any "Abyss ..."
+                if (strstr(low, "abyss") && strstr(low, "gear"))
+                {
+                    g_gearCat = c;
+                    LOG_WARN("equipment: no category matched by content - fell back to the "
+                             "English name match (category %d '%s').",
+                             c, Inventory::CatalogCategoryName(c));
+                    return g_gearCat;
+                }
             }
-            g_gearCat = abyssAny;
-            return g_gearCat;
+
+            // Nothing resolved. Do NOT cache the failure: the item tables may
+            // simply not be populated yet, and the next open should try again.
+            LOG_WARN("equipment: no abyss gear category found among %d categories - the "
+                     "socket picker will stay empty until one resolves.", n);
+            return -1;
         }
 
         // --- Menu-side snapshot ---------------------------------------------

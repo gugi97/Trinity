@@ -124,6 +124,23 @@ namespace trinity::game
         // game's own number is never disturbed. Above that it approaches the
         // cap asymptotically and can never pass it, so no clamp is involved in
         // the normal path and every setting stays distinguishable.
+        // Max Trust is the multiplier taken to its limit, not a second
+        // mechanism: one interaction closes the whole remaining gap to the cap.
+        // Expressing it as a multiplier keeps every site below on one code path.
+        //
+        // 1000x, not something enormous: with the cap at 100 a gain of 1 gives
+        // f = 0.01 and (1 - f)^1000 = 4.3e-5, so the result rounds to exactly
+        // 100 on the first award. Every intermediate number stays small, which
+        // matters on the delta paths that hand a value back to the engine.
+        constexpr float kTrustMaxMult = 1000.0f;
+
+        float TrustMult(const State& st)
+        {
+            if (st.trustMax) return kTrustMaxMult;      // wins over the slider
+            return st.trustMult ? st.trustMultVal : 1.0f;
+        }
+        bool TrustOn(const State& st) { return TrustMult(st) > 1.0f; }
+
         int64_t ScaleGain(int64_t oldVal, int64_t newVal, float mult)
         {
             const int64_t gain = newVal - oldVal;
@@ -255,8 +272,13 @@ namespace trinity::game
                 // shipping binary does not carry these strings at all.
 #if TRINITY_MARKER_RESEARCH
                 {
+                    // One warp pushes every nearby NPC through here at once -
+                    // forty lines in a single second, all of them baseline
+                    // seeding that answers nothing. Only the reward sites are
+                    // still worth a line; the rest are counted by the burst
+                    // accounting Tick() already flushes.
                     static int s_seen = 0;
-                    if (s_seen < 40)
+                    if (greetReward && s_seen < 12)
                     {
                         ++s_seen;
                         LOG("friendly/who: %s first-sight key %u grp %u val %lld "
@@ -300,8 +322,8 @@ namespace trinity::game
             }
 
             const State& st = State::Get();
-            const float mult = st.trustMultVal;
-            const bool  on   = st.trustMult && mult > 1.0f;
+            const float mult = TrustMult(st);
+            const bool  on   = mult > 1.0f;
 
 
             if (on && newVal > oldVal && oldVal < kFriendly_Max &&
@@ -358,7 +380,7 @@ namespace trinity::game
                                           int64_t delta, void* extra)
         {
             const State& st = State::Get();
-            if (st.trustMult && st.trustMultVal > 1.0f && delta > 0)
+            if (TrustOn(st) && delta > 0)
             {
                 // No clamp here on purpose. kFriendly_Max is Trinity's own
                 // number, not the engine's, and the engine evaluates its tier
@@ -367,7 +389,7 @@ namespace trinity::game
                 // subtract and the tier-up notification fire, instead of
                 // Trinity deciding for it.
                 const double scaled = static_cast<double>(delta) *
-                                      static_cast<double>(st.trustMultVal);
+                                      static_cast<double>(TrustMult(st));
                 delta = scaled > 9.0e15 ? static_cast<int64_t>(9.0e15)
                                         : static_cast<int64_t>(scaled);
             }
@@ -406,7 +428,7 @@ namespace trinity::game
                 g_mountGainRet != 0 &&
                 reinterpret_cast<uintptr_t>(_ReturnAddress()) != g_mountGainRet;
 
-            if (siteOk && delta > 0 && st.trustMult && st.trustMultVal > 1.0f)
+            if (siteOk && delta > 0 && TrustOn(st))
             {
                 // Cap so the total cannot pass the ceiling; the engine clamps
                 // too, but asking it for less is cheaper than relying on that.
@@ -418,7 +440,7 @@ namespace trinity::game
                         : kFriendly_Max;
 
                 const double  scaled = static_cast<double>(delta) *
-                                       static_cast<double>(st.trustMultVal);
+                                       static_cast<double>(TrustMult(st));
                 const int64_t want   = (scaled >= static_cast<double>(room))
                                            ? room
                                            : static_cast<int64_t>(scaled + 0.5);

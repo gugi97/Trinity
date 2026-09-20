@@ -3,13 +3,13 @@
 
 // Development-only research tooling. Release builds leave this at 0.
 #ifndef TRINITY_MARKER_RESEARCH
-#define TRINITY_MARKER_RESEARCH 0
+#define TRINITY_MARKER_RESEARCH 1
 #endif
 // Single source of truth for the mod version.
 // Keep the numeric components in sync with the string below; the Windows
 // VERSIONINFO resource (Trinity.rc) builds FILEVERSION/PRODUCTVERSION from them.
 #define TRINITY_VERSION_MAJOR 0
 #define TRINITY_VERSION_MINOR 19
-#define TRINITY_VERSION_PATCH 1
+#define TRINITY_VERSION_PATCH 2
 
-#define TRINITY_VERSION "0.19.1"
+#define TRINITY_VERSION "0.19.2"

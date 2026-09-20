@@ -103,6 +103,14 @@ namespace trinity::gui
                         "While airborne, hold Caps Lock / RB to rise or Ctrl / Right Trigger "
                         "to sink. Let go and normal physics resume - jumps and aerial attacks "
                         "are untouched.");
+        changed |= ui::Toggle("Max Trust", &st.trustMax,
+                        game::Friendly::Ready()
+                            ? "One greet, gift or feed takes a mount, pet or NPC "
+                              "straight to 100 trust - no multiplier to pick. Trust "
+                              "still has to be earned once per creature; this only "
+                              "removes the grind, not the interaction. Overrides the "
+                              "multiplier below while it is on."
+                            : "Unavailable - the trust reward sites did not resolve.");
         changed |= ui::ToggleFloat("Trust Multiplier", &st.trustMult, &st.trustMultVal, 1.0f, 25.0f, 0.25f, 3.0f, "%.2fx",
                         game::Friendly::Ready()
                             ? "Greeting, gifting and feeding all build trust faster. "
@@ -757,6 +765,26 @@ namespace trinity::gui
         }
 
         const int total = game::Equipment::GearCount();
+#if TRINITY_MARKER_RESEARCH
+        {
+            // How big the gear catalog actually is, and what its last row is.
+            // "the catalog is all materials" and "every row reads zero" look
+            // identical from the filter alone.
+            static int s_lastTotal = -1;
+            if (total != s_lastTotal)
+            {
+                s_lastTotal = total;
+                uint16_t    firstId = 0, lastId = 0;
+                const char* firstNm = nullptr; const char* lastNm = nullptr;
+                const char* ic = nullptr;
+                game::Equipment::GetGear(0, &firstId, &firstNm, &ic);
+                game::Equipment::GetGear(total - 1, &lastId, &lastNm, &ic);
+                LOG("gear/fit: CATALOG total=%d first=%u '%s' last=%u '%s'",
+                    total, firstId, firstNm ? firstNm : "?",
+                    lastId, lastNm ? lastNm : "?");
+            }
+        }
+#endif
         if (total == 0)
         {
             ui::Option("No abyss gears found",

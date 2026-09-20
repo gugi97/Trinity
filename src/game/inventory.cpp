@@ -2819,10 +2819,29 @@ namespace trinity::game
         {
             if (!g_stackApplied || g_stackAppliedVal != st.invStackSizeVal)
             {
-                if (SetAllMaxStackSizes(true, st.invStackSizeVal))
+                // One pass walks the whole ItemInfo table - up to 65536 rows,
+                // each a DefForRow plus two reads and two writes. It returns
+                // false whenever nothing could be written, which is exactly
+                // what happens while the engine is rebuilding that table
+                // during a save load: every row fails, the flag stays clear,
+                // and the walk runs again on the next tick. At 60 Hz that is
+                // millions of row lookups a second, and it showed up as a
+                // save load that burned two cores with zero disk reads.
+                //
+                // Throttle the RETRY, not the success. Stamp the clock before
+                // the walk rather than after one that worked - pacing on
+                // success means a run of failures paces itself at zero, which
+                // is the same mistake the holder-walk hang was.
+                static ULONGLONG s_lastStackTry = 0;
+                const ULONGLONG now = GetTickCount64();
+                if (now - s_lastStackTry >= 1000)
                 {
-                    g_stackApplied    = true;
-                    g_stackAppliedVal = st.invStackSizeVal;
+                    s_lastStackTry = now;
+                    if (SetAllMaxStackSizes(true, st.invStackSizeVal))
+                    {
+                        g_stackApplied    = true;
+                        g_stackAppliedVal = st.invStackSizeVal;
+                    }
                 }
             }
         }
@@ -2986,6 +3005,137 @@ namespace trinity::game
         return KeyForType(typeId, out, n);
     }
 
+#if TRINITY_MARKER_RESEARCH
+    // Why a gear shows no effect line. AppendBuffLines reads _enchantDataList
+    // entry 0 only; this walks every entry and prints what is actually there,
+    // so the answer comes from the data instead of from reasoning about it.
+    // Bounded: at most 8 gears per session, and only gears that came out blank.
+    static void ProbeGearChain(uint16_t typeId, uintptr_t def)
+    {
+        // Only the gears whose effect is still unexplained are worth a slot:
+        // the ones with no buff keys at all. Deciding before the slot is taken
+        // stops four alphabetically-early gears from eating the whole budget.
+        {
+            uintptr_t e0 = 0; uint32_t ec = 0, kc = 0; uintptr_t kk = 0;
+            if (!ReadPtr(def + kOff_ItemDef_EnchantList, &e0) || e0 < kMinPointer) return;
+            if (!Read32(def + kOff_ItemDef_EnchantCount, &ec) || ec == 0) return;
+            ReadPtr(e0 + kOff_EnchantRec_EquipBuffs, &kk);
+            Read32(e0 + kOff_EnchantRec_BuffCount, &kc);
+            if (kk >= kMinPointer && kc != 0) return;   // has buffs: already explained
+        }
+
+        static uint16_t s_seen[4] = {};
+        static size_t   s_count   = 0;
+        for (size_t i = 0; i < s_count; ++i) if (s_seen[i] == typeId) return;
+        if (s_count >= 4) return;
+        s_seen[s_count++] = typeId;
+
+        char name[80] = {};
+        Inventory::NameForTypeId(typeId, name, sizeof(name));
+
+        // itemType and equipHash are the two candidates for telling a real gear
+        // apart from a refinement material. Print both next to the enchant
+        // count so the discriminator is chosen from data, not assumed.
+        uint8_t   itype = 0;
+        uint32_t  ehash = 0;
+        uintptr_t ench  = 0;
+        uint32_t  ecnt  = 0;
+        Read8(def + kOff_ItemDef_ItemType, &itype);
+        Read32(def + kOff_ItemDef_EquipHash, &ehash);
+        ReadPtr(def + kOff_ItemDef_EnchantList, &ench);
+        Read32(def + kOff_ItemDef_EnchantCount, &ecnt);
+        LOG("gear/probe: type=%u itemType=0x%02X equipHash=0x%08X ench=%p cnt=%u '%s'",
+            typeId, itype, ehash, reinterpret_cast<void*>(ench), ecnt, name);
+        if (ench < kMinPointer) return;
+        if (ecnt > kEnchantList_SaneMax) ecnt = kEnchantList_SaneMax;
+
+        for (uint32_t e = 0; e < ecnt; ++e)
+        {
+            const uintptr_t rec = ench + static_cast<uintptr_t>(e) * kOff_EnchantData_Stride;
+            uint16_t  lvl  = 0;
+            uintptr_t keys = 0;
+            uint32_t  kcnt = 0;
+            Read16(rec + kOff_EnchantData_Level, &lvl);
+            ReadPtr(rec + kOff_EnchantRec_EquipBuffs, &keys);
+            Read32(rec + kOff_EnchantRec_BuffCount, &kcnt);
+            LOG("gear/probe:   entry %u level=%u buffs=%p count=%u",
+                e, lvl, reinterpret_cast<void*>(keys), kcnt);
+
+            // Stat gears - Destruction, Swift, Insight - carry no buff keys at
+            // all, yet the game shows them a flat number ("Serang 2",
+            // "Defense 6"). That number has to live in the enchant record
+            // itself. Dump the record so the field can be located by comparing
+            // tiers rather than guessed at.
+            if (kcnt == 0)
+            {
+                char hx[260]; size_t u = 0;
+                for (uint32_t off = 0; off < 0x70 && u + 4 < sizeof(hx); off += 4)
+                {
+                    uint32_t w = 0;
+                    Read32(rec + off, &w);
+                    u += static_cast<size_t>(snprintf(hx + u, sizeof(hx) - u,
+                            "%s%02X:%08X", u ? " " : "", off, w));
+                }
+                LOG("gear/probe:     no buffs - enchant record = %s", hx);
+                continue;
+            }
+            if (keys < kMinPointer || kcnt > kBuff_MaxCount) continue;
+
+            for (uint32_t i = 0; i < kcnt; ++i)
+            {
+                const uintptr_t key = keys + static_cast<uintptr_t>(i) * kBuffKey_Stride;
+                uint16_t row = 0;
+                uint32_t bl  = 0;
+                Read16(key + kOff_BuffKey_Row, &row);
+                Read32(key + kOff_BuffKey_Level, &bl);
+
+                uintptr_t bdef = 0, list = 0, desc = 0;
+                uint32_t  lcnt = 0;
+                uint16_t  pat  = 0xFFFF;
+                const bool haveDef = DefForRow(g_buffTableGlobal, row, &bdef);
+                if (haveDef)
+                {
+                    ReadPtr(bdef + kOff_BuffDef_DataList, &list);
+                    Read32(bdef + kOff_BuffDef_DataCnt, &lcnt);
+                    if (list >= kMinPointer && lcnt)
+                    {
+                        const uint32_t idx = bl < lcnt ? bl : lcnt - 1;
+                        ReadPtr(list + static_cast<uintptr_t>(idx) * kBuffData_Stride
+                                     + kOff_BuffData_Desc, &desc);
+                        if (desc >= kMinPointer) Read16(desc + kOff_BuffDesc_Pattern, &pat);
+                    }
+                }
+                LOG("gear/probe:     key %u row=%u level=%u def=%d dataCount=%u "
+                    "desc=%p pattern=%u", i, row, bl, haveDef ? 1 : 0, lcnt,
+                    reinterpret_cast<void*>(desc), pat);
+
+                // The selected element came back empty. Trinity indexes
+                // _buffDataList BY the key's level; each element also carries a
+                // level of its own at +0x00. Where the list is 10 long those
+                // happen to agree, and where it is 30 long they do not - which
+                // is why Abyssbane III resolves and I and II do not. Dump the
+                // table so the right lookup is chosen from data.
+                if (pat == kPattern_None && list >= kMinPointer && lcnt)
+                {
+                    const uint32_t show = lcnt > 30 ? 30 : lcnt;
+                    char line[320]; size_t u = 0;
+                    for (uint32_t e = 0; e < show && u + 20 < sizeof(line); ++e)
+                    {
+                        const uintptr_t el = list + static_cast<uintptr_t>(e) * kBuffData_Stride;
+                        uint32_t  elLvl = 0; uintptr_t elDesc = 0; uint16_t elPat = 0xFFFF;
+                        Read32(el + kOff_BuffData_Level, &elLvl);
+                        if (ReadPtr(el + kOff_BuffData_Desc, &elDesc) && elDesc >= kMinPointer)
+                            Read16(elDesc + kOff_BuffDesc_Pattern, &elPat);
+                        u += static_cast<size_t>(snprintf(line + u, sizeof(line) - u,
+                                "%s%u:%u/%u", u ? " " : "", e, elLvl, elPat));
+                    }
+                    LOG("gear/probe:       table idx:level/pattern = %s", line);
+                }
+            }
+        }
+    }
+#endif
+
     // The abyss-gear half of EffectsForTypeId: walk _enchantDataList -> the
     // buff rows -> the display template, and append one line per buff.
     //
@@ -3029,17 +3179,37 @@ namespace trinity::game
             if (!ReadPtr(bdef + kOff_BuffDef_DataList, &list) || list < kMinPointer) continue;
             if (!Read32(bdef + kOff_BuffDef_DataCnt, &lcnt) || lcnt == 0) continue;
 
-            // Index by the entry's own level. Tiers of one gear share a buff
-            // row and differ only here, so taking element 0 printed tier I's
-            // number for all of them.
-            if (buffLvl >= lcnt) buffLvl = lcnt - 1;   // never walk past the list
-            const uintptr_t rec = list + static_cast<uintptr_t>(buffLvl) * kBuffData_Stride;
-
+            // _buffDataList is NOT indexed by level. Measured on buff row 154
+            // (Abyssbane), 30 elements - three per level, and only the first of
+            // each triple carries a descriptor with a resolvable pattern:
+            //
+            //   idx:level/pattern = 0:1/88 1:1/FFFF 2:1/FFFF 3:2/88 4:2/FFFF ...
+            //
+            // Using the level AS the index landed on a sibling. Abyssbane I
+            // (level 2) read idx 2 and got FFFF, II (level 4) read idx 4 and got
+            // FFFF, while III (level 6) hit idx 6 and resolved by luck. On the
+            // ten-element rows, where there is one element per level, the same
+            // mistake read the NEXT level's element - same pattern, wrong
+            // number - so the lines that did appear were off by one tier.
+            //
+            // Match the element's own level field instead, and prefer one whose
+            // descriptor actually resolves.
             uintptr_t desc = 0;
-            if (!ReadPtr(rec + kOff_BuffData_Desc, &desc) || desc < kMinPointer) continue;
+            uint16_t  pat  = kPattern_None;
+            for (uint32_t e = 0; e < lcnt; ++e)
+            {
+                const uintptr_t el = list + static_cast<uintptr_t>(e) * kBuffData_Stride;
+                uint32_t elLvl = 0;
+                if (!Read32(el + kOff_BuffData_Level, &elLvl) || elLvl != buffLvl) continue;
 
-            uint16_t pat = 0;
-            if (!Read16(desc + kOff_BuffDesc_Pattern, &pat) || pat == kPattern_None) continue;
+                uintptr_t d = 0;
+                if (!ReadPtr(el + kOff_BuffData_Desc, &d) || d < kMinPointer) continue;
+                uint16_t p = 0;
+                if (!Read16(d + kOff_BuffDesc_Pattern, &p) || p == kPattern_None) continue;
+                desc = d; pat = p;
+                break;
+            }
+            if (!desc) continue;   // no element at this level carries a description
 
             uintptr_t pdef = 0;
             if (!DefForRow(g_patTableGlobal, pat, &pdef)) continue;
@@ -3053,8 +3223,9 @@ namespace trinity::game
 
             // The template carries a placeholder. Ask the engine to fill it;
             // if it cannot, show the template anyway - it still names the stat.
-            uint32_t lvl = 0, cnt = 0;
-            Read32(rec + kOff_BuffData_Level, &lvl);
+            // The element was matched ON its level, so buffLvl IS its level.
+            uint32_t cnt = 0;
+            const uint32_t lvl = buffLvl;
             Read32(bdef + kOff_BuffDef_FormatArg, &cnt);
             char line[192] = {};
             const char* text = tmpl;
@@ -3178,28 +3349,127 @@ namespace trinity::game
         return g_spawnedIds.find(instanceId) != g_spawnedIds.end();
     }
 
-    bool Inventory::GearFitsSlot(uint16_t gearTypeId, uint16_t pieceTypeId)
-    {
-        // Fail OPEN. A filter that hides things has to be right, and when this
-        // cannot resolve the piece it does not know enough to hide anything -
-        // so it says yes. Showing a gear that does not fit costs one refused
-        // socket; hiding one that does fit locks the player out of it with no
-        // way to tell why.
-        uintptr_t list = 0;
-        uint32_t  cnt  = 0;
-        if (!PieceHashList(pieceTypeId, &list, &cnt)) return true;
+    // Split from GearFitsSlot so the research wrapper below can say WHY a row
+    // was kept or dropped. Verdict semantics are unchanged.
+    enum class FitWhy { NoGearDef, HashUnreadable, ZeroHash, NoPieceList, HashMiss, HashHit };
 
+    static bool FitDecide(uint16_t gearTypeId, uint16_t pieceTypeId,
+                          FitWhy* why, uint32_t* ghOut, uint32_t* cntOut)
+    {
+        *why = FitWhy::NoGearDef; *ghOut = 0; *cntOut = 0;
+
+        // Resolve the gear FIRST. Its own item type is a definite answer, and a
+        // definite no must not be swallowed by the fail-open rule below.
         uintptr_t gdef = 0;
         if (!DefForRow(g_itemTableGlobal, gearTypeId, &gdef)) return true;
+
+        // _equipAbleHash is the engine's own "what can wear this" key. A row with
+        // a hash is equippable somewhere; a row with 0x00000000 is equippable
+        // NOWHERE. That is a resolved no, not an unknown, so it must not reach
+        // the fail-open below - and this one line is what let 138 refinement
+        // materials into the picker, sorted above the real gears.
+        //
+        // Measured both sides rather than assumed: 40 catalog rows of "Sealed
+        // Abyss Artifact" all read equipHash 0x00000000 with no enchant data at
+        // all, while a real gear must carry a hash for SlotsForTypeId to print
+        // its slot line - which it does.
+        // REVERTED to the e5b3303 behaviour, which is the one users confirm
+        // works. Treating a zero hash as a definite "fits nothing" hid every
+        // row on a Main Hand socket, not just the refinement materials - so
+        // real gears read zero here too, at least under the installed
+        // dmmv3_iteminfo override. A zero is therefore an UNKNOWN at runtime,
+        // whatever the base archive says, and unknown means fail open.
         uint32_t gh = 0;
-        if (!Read32(gdef + kOff_ItemDef_EquipHash, &gh) || gh == 0) return true;
+        if (!Read32(gdef + kOff_ItemDef_EquipHash, &gh))
+        { *why = FitWhy::HashUnreadable; return true; }
+        *ghOut = gh;
+        if (gh == 0) { *why = FitWhy::ZeroHash; return true; }   // unknown: show it
+
+        // Fail OPEN from here. A filter that hides things has to be right, and
+        // when this cannot resolve the piece it does not know enough to hide
+        // anything - so it says yes. Showing a gear that does not fit costs one
+        // refused socket; hiding one that does fit locks the player out of it
+        // with no way to tell why.
+        uintptr_t list = 0;
+        uint32_t  cnt  = 0;
+        if (!PieceHashList(pieceTypeId, &list, &cnt))
+        { *why = FitWhy::NoPieceList; return true; }
+        *cntOut = cnt;
 
         for (uint32_t i = 0; i < cnt; ++i)
         {
             uint32_t h = 0;
-            if (Read32(list + static_cast<uintptr_t>(i) * 4, &h) && h == gh) return true;
+            if (Read32(list + static_cast<uintptr_t>(i) * 4, &h) && h == gh)
+            { *why = FitWhy::HashHit; return true; }
         }
+        *why = FitWhy::HashMiss;
         return false;
+    }
+
+    bool Inventory::IsAbyssGearType(uint16_t typeId)
+    {
+        uintptr_t def = 0;
+        if (!DefForRow(g_itemTableGlobal, typeId, &def)) return false;
+        uint8_t t = 0;
+        if (!Read8(def + kOff_ItemDef_ItemType, &t)) return false;
+        return t == kItemType_AbyssGear;
+    }
+
+    bool Inventory::HasEnchantData(uint16_t typeId)
+    {
+        uintptr_t def = 0;
+        if (!DefForRow(g_itemTableGlobal, typeId, &def)) return false;
+        uintptr_t ench = 0;
+        uint32_t  cnt  = 0;
+        if (!ReadPtr(def + kOff_ItemDef_EnchantList, &ench) || ench < kMinPointer) return false;
+        if (!Read32(def + kOff_ItemDef_EnchantCount, &cnt)) return false;
+        return cnt > 0 && cnt <= kEnchantList_SaneMax;
+    }
+
+    bool Inventory::GearFitsSlot(uint16_t gearTypeId, uint16_t pieceTypeId)
+    {
+        FitWhy   why = FitWhy::NoGearDef;
+        uint32_t gh = 0, cnt = 0;
+        const bool ok = FitDecide(gearTypeId, pieceTypeId, &why, &gh, &cnt);
+
+#if TRINITY_MARKER_RESEARCH
+        // A picker that comes back empty leaves no row for the gear probe to
+        // run on, so the reason has to be logged HERE. Bounded: the first 12
+        // decisions per piece, reset whenever the piece changes.
+        {
+            static uint16_t s_piece  = 0xFFFE;
+            static int      s_logged = 0;
+            static uint32_t s_zeroes = 0;
+            if (pieceTypeId != s_piece)
+            {
+                s_piece = pieceTypeId; s_logged = 0; s_zeroes = 0;
+
+                // The piece's own accepted-hash list, once. Everything below
+                // is a comparison against it, so its absence or emptiness is
+                // the first thing worth knowing.
+                uintptr_t plist = 0;
+                uint32_t  pcnt  = 0;
+                const bool pok = PieceHashList(pieceTypeId, &plist, &pcnt);
+                char hx[128] = {}; size_t hu = 0;
+                for (uint32_t i = 0; pok && i < pcnt && i < 8 && hu + 12 < sizeof(hx); ++i)
+                {
+                    uint32_t h = 0;
+                    Read32(plist + static_cast<uintptr_t>(i) * 4, &h);
+                    hu += static_cast<size_t>(
+                        snprintf(hx + hu, sizeof(hx) - hu, "%s0x%08X", hu ? " " : "", h));
+                }
+                LOG("gear/fit: PIECE %u list=%s count=%u hashes=[%s]",
+                    pieceTypeId, pok ? "ok" : "FAIL", pcnt, hx);
+            }
+
+            // Artifacts are understood and they crowd out the rows that are
+            // not: the catalog is sorted by type id, so 138 zero-hash rows
+            // used up the whole budget before a real gear was ever reached.
+            // Count them, print the rest.
+            (void)gh; (void)cnt; (void)ok; (void)why; (void)gearTypeId;
+        }
+#endif
+        return ok;
     }
 
     bool Inventory::GearRowText(uint16_t typeId, char* out, size_t n,
@@ -3209,6 +3479,27 @@ namespace trinity::game
         if (!out || n == 0) return false;
         out[0] = 0;
         size_t used = 0;
+        size_t effOut = 0;
+
+        // The picker rebuilds every VISIBLE row every frame, and one row costs
+        // an enchant walk, three table lookups and a call into the engine's own
+        // formatter. At 14 rows that never showed; when the slot filter failed
+        // open and the list became 152 rows, opening the menu froze the game.
+        //
+        // None of this text can change while the process lives - it is all item
+        // definition data - so build it once per gear and hand back the copy.
+        // Bounded by the gear catalog, a few hundred entries at most.
+        struct Row { char text[640]; size_t effLen; };
+        static std::map<uint16_t, Row> s_rowCache;
+        {
+            const auto hit = s_rowCache.find(typeId);
+            if (hit != s_rowCache.end())
+            {
+                snprintf(out, n, "%s", hit->second.text);
+                if (effectLen) *effectLen = hit->second.effLen;
+                return out[0] != 0;
+            }
+        }
 
         // The engine's own effect text often opens with the gear's name -
         // "Crescent Moon Slash (Nor Attack after certain moves)". On a row that
@@ -3238,7 +3529,14 @@ namespace trinity::game
         };
 
         char buf[512];
-        if (EffectsForTypeId(typeId, buf, sizeof(buf)))
+        const bool haveEffect = EffectsForTypeId(typeId, buf, sizeof(buf));
+#if TRINITY_MARKER_RESEARCH
+        {
+            uintptr_t pdef = 0;
+            if (DefForRow(g_itemTableGlobal, typeId, &pdef)) ProbeGearChain(typeId, pdef);
+        }
+#endif
+        if (haveEffect)
         {
             const size_t nameLen = strlen(selfName);
             const char* eff = buf;
@@ -3248,8 +3546,26 @@ namespace trinity::game
                 while (*eff == ' ' || *eff == ':') ++eff;   // "Name: ..." and "Name ("
                 if (!*eff) eff = buf;                       // name only - keep it
             }
+            // Stripping the name often leaves the remainder parenthesised -
+            // "Earthrending Strike (Guard just before being hit)" becomes
+            // "(Guard just before being hit)", and the row then brackets it
+            // again: "Earthrending Strike  [(Guard just before being hit)]".
+            // Drop the wrapper, but only when the whole remainder is one pair:
+            // a ')' before the end means the text has parens of its own.
+            if (*eff == '(')
+            {
+                char* const open = const_cast<char*>(eff);
+                const size_t len  = strlen(open);
+                if (len >= 2 && open[len - 1] == ')' &&
+                    strchr(open + 1, ')') == open + len - 1)
+                {
+                    open[len - 1] = 0;
+                    eff = open + 1;
+                }
+            }
             line(eff, false);
-            if (effectLen) *effectLen = used;   // everything written so far IS the effect
+            effOut = used;                      // everything written so far IS the effect
+            if (effectLen) *effectLen = effOut;
         }
         if (SlotsForTypeId(typeId, buf, sizeof(buf)))   line(buf, false);
 
@@ -3271,6 +3587,11 @@ namespace trinity::game
             if (nameLen && _strnicmp(buf, selfName, nameLen) == 0)
                 line(buf, true);
         }
+
+        Row row{};
+        snprintf(row.text, sizeof(row.text), "%s", out);
+        row.effLen = effOut;
+        s_rowCache.emplace(typeId, row);
         return out[0] != 0;
     }
 

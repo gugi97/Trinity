@@ -111,6 +111,10 @@ namespace trinity
         // just reaches max / tames in fewer gifts. 1.0x = game behavior.
         bool  trustMult    = false;
         float trustMultVal = 3.0f;
+        // Max Trust is the same mechanism with the dial pushed to its limit -
+        // one greet, gift or feed closes the whole remaining gap to 100. It
+        // wins over trustMult when both are on, so there is no number to pick.
+        bool  trustMax     = false;
 
         // World features (world.cpp). Game Speed sets the engine's OWN time
         // scale - the multiplier it already applies to its frame delta - so the
@@ -132,9 +136,20 @@ namespace trinity
         // tables - one number re-stamps every item / storage type at once,
         // and turning the toggle back off restores each row's own original
         // value.
+        //
+        // invStackSize defaults ON: it is the row people turn on first and
+        // never turn off, so a fresh install starting with it off just meant
+        // hunting for it. A saved Trinity.ini still wins, so this only
+        // changes what a new install starts with.
+        //
+        // invSlotSize stays OFF, deliberately. The open report "Game crashes
+        // When max inventory slots is selected" has never been reproduced and
+        // the quest it happened in is still unknown, so defaulting it on would
+        // route every new install through an untested path without asking.
+        // Flip it once that report is closed.
         bool invSlotSize     = false;
         int  invSlotSizeVal  = 2000;
-        bool invStackSize    = false;
+        bool invStackSize    = true;
         int  invStackSizeVal = 999999;
 
         // Weather (weather.cpp). Re-stamps a handful of fields across every
