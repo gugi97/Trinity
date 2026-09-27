@@ -18,6 +18,18 @@ namespace trinity
         // say so rather than imply a guarantee that was never made.
         struct KnownBuild { uint16_t revision; const char* tu; bool verified; };
         constexpr KnownBuild kKnown[] = {
+            { 2976, "2.03.02",          true  },  // verified: this patch moved NO byte signature
+                                                  // at all - 42 of 42 still resolve, and the four
+                                                  // ambiguous ones are the four that are always
+                                                  // ambiguous by design (they pair with a
+                                                  // FindPatternIf predicate). Addresses shifted a
+                                                  // few bytes, which is what a signature scan is
+                                                  // for. Run in-game on this build: refine 15/20,
+                                                  // sockets opened and emptied 20/20, Add Item
+                                                  // three times into both realms, durable dye,
+                                                  // No Bounty 35/35, the 190-row abyss gear
+                                                  // catalog and its effect lines, Easy Parry,
+                                                  // Free Flight and all six UI languages
             { 2944, "2.03.00",          true  },  // verified: this patch broke exactly 2 of 42 byte
                                                   // signatures. kSig_InvFreePlacements died on a
                                                   // baked-in jump displacement (0x57 -> 0x5E) while

@@ -4724,6 +4724,58 @@ namespace trinity::game
         return changed;
     }
 
+    // Open every socket on every equipment piece in the bag.
+    //
+    // Deliberately the same shape as RefineAllCarried above: same snapshot,
+    // same live-typeId recheck before each write, same server mirror. The
+    // socket count lives on the item VALUE record next to the refine level,
+    // so a bag item carries it exactly as a worn piece does - the only reason
+    // this was ever worn-only is that nothing had walked the bag yet.
+    int Inventory::UnlockSocketsCarried(bool* persistedAll)
+    {
+        if (persistedAll) *persistedAll = true;
+        Refresh();
+
+        const uintptr_t sh = ServerHolder();
+        int changed = 0;
+
+        for (Storage& store : g_storages)
+            for (Group& g : store.groups)
+                for (Item& it : g.items)
+                {
+                    if (it.slot < kMinPointer || it.typeId == kInvSlot_EmptyType) continue;
+
+                    // Only equipment. The same gate RefineAllCarried uses: an
+                    // item with no enchant list is not a socketable piece, and
+                    // writing a socket count onto one is the shape of write
+                    // that crashed the weapon switch.
+                    uint16_t maxLvl = 0;
+                    if (!MaxRefineForType(it.typeId, &maxLvl) || maxLvl == 0) continue;
+
+                    uint16_t live = 0;
+                    if (!Read16(it.slot + kOff_InvSlot_TypeId, &live) || live != it.typeId)
+                        continue;
+
+                    uint8_t cur = 0;
+                    if (!Read8(it.slot + kOff_ItemVal_SocketUnlocked, &cur)) continue;
+                    if (cur >= static_cast<uint8_t>(kSocket_Max)) continue;
+
+                    if (!Write8(it.slot + kOff_ItemVal_SocketUnlocked,
+                                static_cast<uint8_t>(kSocket_Max)))
+                        continue;
+                    ++changed;
+
+                    const uintptr_t ss = SlotByPos(sh, it.bucketIdx, it.slotIdx, it.typeId);
+                    if (!ss || !Write8(ss + kOff_ItemVal_SocketUnlocked,
+                                       static_cast<uint8_t>(kSocket_Max)))
+                        if (persistedAll) *persistedAll = false;
+                }
+
+        if (changed) ForceRefresh();
+        LOG("inventory: opened every socket on %d carried piece(s).", changed);
+        return changed;
+    }
+
     bool Inventory::IsSpecialCategory(int cat)
     {
         const Group* g = CatGroupAt(cat);

@@ -255,6 +255,9 @@ namespace trinity::game
         // reports whether every write also reached the server realm; false
         // means some of it is session-only and the caller should say so.
         static int  RefineAllCarried(bool* persistedAll = nullptr);
+        // Same bag walk, opening every socket instead of raising the
+        // refine level. Worn pieces are Equipment::UnlockAllSockets.
+        static int  UnlockSocketsCarried(bool* persistedAll = nullptr);
         static bool CatalogReady();
 
         // True once the server-authority holder is known. Normally true within

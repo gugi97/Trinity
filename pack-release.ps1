@@ -54,6 +54,23 @@ Write-Host "cmake  : $cmake"
 Write-Host "release: $relDir"
 
 $backup = [IO.File]::ReadAllText($verH)
+
+# -Version names the zip. TRINITY_VERSION names what the mod reports in its log
+# and its menu header. Nothing kept them in step, so 0.19.3 shipped a binary
+# that still called itself 0.19.2. Refuse rather than silently rewrite: the
+# version is a decision, and a mismatch means someone forgot to make it.
+if ($backup -match '#define TRINITY_VERSION "([^"]+)"') {
+    $inSource = $Matches[1]
+    if ($inSource -ne $Version) {
+        throw ("version mismatch: -Version is '$Version' but src/core/version.h says " +
+               "'$inSource'. Update TRINITY_VERSION, TRINITY_VERSION_MAJOR/MINOR/PATCH, " +
+               "then pack again.")
+    }
+    Write-Host "version: $inSource (source and zip agree)"
+} else {
+    throw "could not read TRINITY_VERSION from $verH"
+}
+
 try {
     $off = $backup -replace "#define TRINITY_MARKER_RESEARCH [01]", "#define TRINITY_MARKER_RESEARCH 0"
     [IO.File]::WriteAllText($verH, $off, (New-Object Text.UTF8Encoding $false))
