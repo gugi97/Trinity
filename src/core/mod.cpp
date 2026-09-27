@@ -13,6 +13,7 @@
 #include "../game/dye.h"
 #include "../game/equipment.h"
 #include "../game/friendly.h"
+#include "../game/fishing.h"
 #include "../game/parry.h"
 #include "../game/weather.h"
 
@@ -64,6 +65,7 @@ namespace trinity
         game::Equipment::Install(); // Abyss-gear socket editor
         game::Friendly::Install();  // Trust Multiplier (gift/feed/tame)
         game::Parry::Install();     // Easy Parry (locates the site; patches nothing yet)
+        game::Fishing::Install();   // Auto Catch Fish (the hooks read the toggle each call)
         if (State::Get().easyParry)
             game::Parry::SetEnabled(true);
         if (State::Get().noBounty)
@@ -90,6 +92,7 @@ namespace trinity
         game::World::Remove();
         game::Dye::Remove();
         game::Equipment::Remove();
+        game::Fishing::Remove();
         game::Parry::Remove();      // restore the game's own bytes first
         game::Friendly::Remove();
         hooks::RemoveDX12Hooks();

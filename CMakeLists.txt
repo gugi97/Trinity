@@ -61,6 +61,7 @@ add_library(Trinity SHARED
     src/game/dye.cpp
     src/game/equipment.cpp
     src/game/friendly.cpp
+    src/game/fishing.cpp
     src/game/parry.cpp
     src/game/weather.cpp
     src/game/pak.cpp

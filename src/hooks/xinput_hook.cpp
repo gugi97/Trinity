@@ -3,6 +3,7 @@
 #include <MinHook.h>
 
 #include <atomic>
+#include <cmath>
 
 #include "../core/state.h"
 
@@ -40,14 +41,75 @@ namespace trinity::hooks
         }
     }
 
+    // Polls left to mask. Written from the game thread, read on whichever
+    // thread polls the pad.
+    static std::atomic<int> g_pulse{0};
+
+    void PulseButtonRelease() { g_pulse.store(1, std::memory_order_relaxed); }
+
+    static void ApplyPulse(XINPUT_STATE* s)
+    {
+        const int left = g_pulse.load(std::memory_order_relaxed);
+        if (left <= 0)
+            return;
+        g_pulse.store(left - 1, std::memory_order_relaxed);
+
+        if (!s->Gamepad.wButtons && !s->Gamepad.bLeftTrigger &&
+            !s->Gamepad.bRightTrigger)
+            return;   // nothing held - spend the poll, change nothing
+
+        s->Gamepad.wButtons      = 0;
+        s->Gamepad.bLeftTrigger  = 0;
+        s->Gamepad.bRightTrigger = 0;
+        ++s->dwPacketNumber;      // the release has to read as a change
+    }
+
+    // Deadline for the synthetic right-stick rotation, 0 when idle.
+    static std::atomic<ULONGLONG> g_stickUntil{0};
+    static std::atomic<uint32_t>  g_stickPhase{0};
+
+    void DriveRightStickUntil(ULONGLONG deadlineTicks)
+    {
+        g_stickUntil.store(deadlineTicks, std::memory_order_relaxed);
+    }
+
+    static void ApplyStick(XINPUT_STATE* s)
+    {
+        const ULONGLONG until = g_stickUntil.load(std::memory_order_relaxed);
+        if (!until)
+            return;
+        const ULONGLONG now = GetTickCount64();
+        if (now >= until)
+        {
+            g_stickUntil.store(0, std::memory_order_relaxed);
+            return;
+        }
+
+        // Advance per poll, not per millisecond. GetTickCount64 moves in ~15.6ms
+        // steps, so several polls in a row shared one tick and therefore one
+        // angle - a stick that does not move. A counter turns on every poll
+        // whatever the clock does.
+        constexpr uint32_t kStepsPerTurn = 16;
+        constexpr double   kTwoPi        = 6.283185307179586;
+        const uint32_t step = g_stickPhase.fetch_add(1, std::memory_order_relaxed);
+        const double a = static_cast<double>(step % kStepsPerTurn) / kStepsPerTurn * kTwoPi;
+        s->Gamepad.sThumbRX = static_cast<SHORT>(std::cos(a) * 32000.0);
+        s->Gamepad.sThumbRY = static_cast<SHORT>(std::sin(a) * 32000.0);
+        ++s->dwPacketNumber;
+    }
+
     // A distinct detour per module so each can call the matching trampoline
     // (MinHook can't tell us which target a shared detour was invoked for).
     #define TRINITY_XINPUT_DETOUR(NAME, ORIG)                              \
         static DWORD WINAPI NAME(DWORD i, XINPUT_STATE* s)                 \
         {                                                                  \
             const DWORD r = ORIG(i, s);                                    \
-            if (r == ERROR_SUCCESS && s && State::Get().menuOpen)         \
-                Neutralize(s);                                             \
+            if (r == ERROR_SUCCESS && s)                                   \
+            {                                                              \
+                if (State::Get().menuOpen) Neutralize(s);                  \
+                ApplyPulse(s);                                             \
+                ApplyStick(s);                                             \
+            }                                                              \
             return r;                                                      \
         }
     TRINITY_XINPUT_DETOUR(hk_1_4,   o_1_4)

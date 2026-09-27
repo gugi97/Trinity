@@ -16,6 +16,7 @@
 #include "../core/settings.h"
 #include "../core/state.h"
 #include "../core/text.h"
+#include "../game/fishing.h"
 #include "../game/parry.h"
 #include "../game/player.h"
 #include "../game/teleport.h"
@@ -108,22 +109,25 @@ namespace trinity::gui
                             ? "One greet, gift or feed takes a mount, pet or NPC "
                               "straight to 100 trust - no multiplier to pick. Trust "
                               "still has to be earned once per creature; this only "
-                              "removes the grind, not the interaction. Overrides the "
-                              "multiplier below while it is on."
+                              "removes the grind, not the interaction."
                             : "Unavailable - the trust reward sites did not resolve.");
-        changed |= ui::ToggleFloat("Trust Multiplier", &st.trustMult, &st.trustMultVal, 1.0f, 25.0f, 0.25f, 3.0f, "%.2fx",
-                        game::Friendly::Ready()
-                            ? "Greeting, gifting and feeding all build trust faster. "
-                              "Trust itself stops at 100, so this compresses progress toward "
-                              "that ceiling rather than multiplying the number: a +5 award "
-                              "becomes +14 at 3.00x and +64 at 20.00x. Every setting stays "
-                              "different from the next, and none of them can pass 100."
-                            : "Greeting, gifting and feeding all build trust faster. "
-                              "Unavailable right now.");
+        if (ui::Toggle("Auto Catch Fish", &st.instantFishing,
+                       game::Fishing::Available()
+                           ? "Cast, and the rest is done for you: the reel turns itself "
+                             "and the attempt cannot be lost. Reeling is driven on the "
+                             "right stick, so that part needs a controller."
+                           : "Unavailable - the catch settle site did not resolve."))
+        {
+            game::Fishing::SetEnabled(st.instantFishing);
+            changed = true;
+        }
+
         if (ui::Toggle("Easy Parry", &st.easyParry,
                        game::Parry::Available()
-                           ? "Removes the timing-margin test on a parry. You still have to parry the "
-                             "attack - it just no longer has to be frame-perfect."
+                           ? "Parries a held block. A parry only starts on a press edge, so "
+                             "when an attack enters its parry window whatever you are holding "
+                             "is released and pressed again for you - pad, keyboard or mouse - "
+                             "and the timing margin inside the window is removed."
                            : "Removes the timing-margin test on a parry. Unavailable right now."))
         {
             game::Parry::SetEnabled(st.easyParry);
@@ -571,6 +575,20 @@ namespace trinity::gui
                 const int k = game::Equipment::UnlockAllSockets();
                 snprintf(s_eqBatchMsg, sizeof(s_eqBatchMsg),
                          k == 0 ? "Nothing to unlock." : "Opened the sockets on %d piece(s).", k);
+            }
+
+            if (ui::Option("Unlock All Sockets (Inventory)",
+                           "Opens all five sockets on every equipment piece you are "
+                           "CARRYING, not just what you have equipped."))
+            {
+                bool all = false;
+                const int k = game::Inventory::UnlockSocketsCarried(&all);
+                snprintf(s_eqBatchMsg, sizeof(s_eqBatchMsg),
+                         k == 0 ? "Nothing in your bags to unlock."
+                                : (all ? "Opened the sockets on %d carried piece(s)."
+                                       : "Opened the sockets on %d carried piece(s) - some are "
+                                         "this session only."),
+                         k);
             }
 
             if (ui::Option("Remove All Abyss Gear",

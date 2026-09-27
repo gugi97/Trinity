@@ -136,8 +136,7 @@ namespace trinity::game
 
         float TrustMult(const State& st)
         {
-            if (st.trustMax) return kTrustMaxMult;      // wins over the slider
-            return st.trustMult ? st.trustMultVal : 1.0f;
+            return st.trustMax ? kTrustMaxMult : 1.0f;
         }
         bool TrustOn(const State& st) { return TrustMult(st) > 1.0f; }
 

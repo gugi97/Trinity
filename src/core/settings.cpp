@@ -98,9 +98,8 @@ namespace trinity
             else if (!strcmp(key, "superJumpMult"))   vals.superJumpMult  = strtof(val, nullptr);
             else if (!strcmp(key, "freeFlight"))      vals.freeFlight     = atoi(val) != 0;
             else if (!strcmp(key, "flightSpeed"))     vals.flightSpeed    = strtof(val, nullptr);
-            else if (!strcmp(key, "trustMult"))       vals.trustMult      = atoi(val) != 0;
-            else if (!strcmp(key, "trustMultVal"))    vals.trustMultVal   = strtof(val, nullptr);
             else if (!strcmp(key, "trustMax"))        vals.trustMax       = atoi(val) != 0;
+            else if (!strcmp(key, "instantFishing"))  vals.instantFishing = atoi(val) != 0;
             else if (!strcmp(key, "invSlotSize"))     vals.invSlotSize    = atoi(val) != 0;
             else if (!strcmp(key, "invSlotSizeVal"))  vals.invSlotSizeVal = atoi(val);
             else if (!strcmp(key, "invStackSize"))    vals.invStackSize   = atoi(val) != 0;
@@ -163,9 +162,8 @@ namespace trinity
         st.superJumpMult   = ClampF(vals.superJumpMult, 1.0f, 10.0f);
         st.freeFlight      = vals.freeFlight;
         st.flightSpeed     = ClampF(vals.flightSpeed, 1.0f, 40.0f);
-        st.trustMult       = vals.trustMult;
-        st.trustMultVal    = ClampF(vals.trustMultVal, 1.0f, 25.0f);
         st.trustMax        = vals.trustMax;
+        st.instantFishing  = vals.instantFishing;
         st.invSlotSize     = vals.invSlotSize;
         st.invSlotSizeVal  = ClampI(vals.invSlotSizeVal, 1, 9999);
         st.invStackSize    = vals.invStackSize;
@@ -236,9 +234,8 @@ namespace trinity
                 "superJumpMult=%.3f\n"
                 "freeFlight=%d\n"
                 "flightSpeed=%.3f\n"
-                "trustMult=%d\n"
-                "trustMultVal=%.3f\n"
                 "trustMax=%d\n"
+                "instantFishing=%d\n"
                 "invSlotSize=%d\n"
                 "invSlotSizeVal=%d\n"
                 "invStackSize=%d\n"
@@ -276,9 +273,8 @@ namespace trinity
                 st.superJumpMult,
                 st.freeFlight ? 1 : 0,
                 st.flightSpeed,
-                st.trustMult ? 1 : 0,
-                st.trustMultVal,
                 st.trustMax ? 1 : 0,
+                st.instantFishing ? 1 : 0,
                 st.invSlotSize ? 1 : 0,
                 st.invSlotSizeVal,
                 st.invStackSize ? 1 : 0,
@@ -327,9 +323,8 @@ namespace trinity
         st.superJumpMult   = def.superJumpMult;
         st.freeFlight      = def.freeFlight;
         st.flightSpeed     = def.flightSpeed;
-        st.trustMult       = def.trustMult;
-        st.trustMultVal    = def.trustMultVal;
         st.trustMax        = def.trustMax;
+        st.instantFishing  = def.instantFishing;
         st.invSlotSize     = def.invSlotSize;
         st.invSlotSizeVal  = def.invSlotSizeVal;
         st.invStackSize    = def.invStackSize;

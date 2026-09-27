@@ -109,12 +109,18 @@ namespace trinity
         // apply funnel. Only real interactions are scaled (save-load is not);
         // the value still caps at the game's max (100), so a high multiplier
         // just reaches max / tames in fewer gifts. 1.0x = game behavior.
-        bool  trustMult    = false;
-        float trustMultVal = 3.0f;
-        // Max Trust is the same mechanism with the dial pushed to its limit -
-        // one greet, gift or feed closes the whole remaining gap to 100. It
-        // wins over trustMult when both are on, so there is no number to pick.
+        // One greet, gift or feed closes the whole remaining gap to the cap.
+        //
+        // This replaced a 1x-25x Trust Multiplier. The slider only ever
+        // controlled HOW FAST you reached the same ceiling of 100, so every
+        // setting was a slower road to one destination - and it made the
+        // player pick a number before the feature would do anything.
         bool  trustMax     = false;
+        // Instant Fishing (fishing.cpp). Every catch attempt settles as a
+        // success: the QTE input verdict and the settlement record both
+        // read this, so turning it off restores the game's own judgement
+        // without touching a hook.
+        bool  instantFishing = false;
 
         // World features (world.cpp). Game Speed sets the engine's OWN time
         // scale - the multiplier it already applies to its frame delta - so the
